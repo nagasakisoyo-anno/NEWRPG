@@ -62,7 +62,7 @@ cd ..
 echo [3/3] 启动服务...
 echo.
 echo ========================================
-echo   前端 (热更新): http://localhost:5173
+echo   前端 (热更新): http://localhost:5000
 echo   后端 API:     http://localhost:8000
 echo   按 Ctrl+C 停止所有服务
 echo ========================================

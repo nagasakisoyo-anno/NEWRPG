@@ -91,7 +91,7 @@ Pop-Location
 Write-Host "[3/3] 启动服务..." -ForegroundColor Cyan
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
-Write-Host "  前端 (热更新): http://localhost:5173" -ForegroundColor Green
+Write-Host "  前端 (热更新): http://localhost:5000" -ForegroundColor Green
 Write-Host "  后端 API:      http://localhost:8000" -ForegroundColor Green
 Write-Host "  按 Ctrl+C 停止所有服务" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green

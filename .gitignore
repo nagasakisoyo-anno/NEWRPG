@@ -1,6 +1,13 @@
 # ChromaDB 持久化数据
 data/chroma/
 
+# 运行时存档 / 记忆图（属于玩家数据，不入库）
+data/save.json
+data/memory_graph.json
+
+# 前端构建产物
+web/tsconfig.tsbuildinfo
+
 # Python 缓存
 __pycache__/
 *.pyc
@@ -31,6 +38,13 @@ Thumbs.db
 # Git 工作树
 .worktrees/
 .claude/
+
+# 本地工具目录（依赖 / 临时文件 / 权限审计报告）
+.deps/
+.tmp/
+.harness/
+.acl-report/
+.probe_write/
 
 参考
 世界生成
