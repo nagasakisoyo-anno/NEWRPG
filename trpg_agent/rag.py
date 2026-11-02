@@ -384,6 +384,37 @@ class KnowledgeBase:
 
         return results
 
+    def list_all(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Return stored knowledge entries as plain dicts (for the Web UI).
+
+        Administrative listing: it deliberately skips the known_by permission
+        filter because it backs the out-of-character world-knowledge panel.
+
+        Returns
+        -------
+        list of dict
+            Each entry has id, content, category and known_by.
+        """
+        try:
+            raw = self._collection.get(limit=limit)
+        except Exception:
+            return []
+
+        ids = raw.get("ids") or []
+        documents = raw.get("documents") or []
+        metadatas = raw.get("metadatas") or []
+
+        entries: List[Dict[str, Any]] = []
+        for i, kid in enumerate(ids):
+            meta = metadatas[i] if i < len(metadatas) and metadatas[i] else {}
+            entries.append({
+                "id": kid,
+                "content": documents[i] if i < len(documents) else "",
+                "category": meta.get("category") or "\u672a\u5206\u7c7b",
+                "known_by": meta.get("known_by") or "\u6240\u6709\u4eba",
+            })
+        return entries
+
     def load_from_dir(self, dir_path: str, chunk_tokens: int = 500,
                       overlap_tokens: int = 100) -> None:
         """Load all ``.md`` files from a directory.

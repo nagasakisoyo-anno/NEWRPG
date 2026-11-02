@@ -5,7 +5,7 @@ Phase 2: invoke_npc routes to a real NPC Agent that independently decides how to
 
 from agents import Agent, RunContextWrapper, function_tool
 
-from trpg_agent.agent_config import GameContext, DEFAULT_MODEL
+from trpg_agent.agent_config import DEFAULT_MODEL
 
 
 # ---------------------------------------------------------------------------

@@ -50,10 +50,14 @@ def _require_auth(credentials: HTTPAuthorizationCredentials | None = Depends(_au
 
 app = FastAPI(title="TRPG Agent API")
 
+# "*" + allow_credentials=True is rejected by browsers, so credentials are only
+# enabled when explicit origins are configured.
+_cors_origins = [o.strip() for o in os.environ.get("TRPG_CORS_ORIGINS", "*").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials="*" not in _cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -64,6 +68,10 @@ app.add_middleware(
 
 _gm: GameMaster | None = None
 _config_path = os.environ.get("TRPG_CONFIG", "config.yaml")
+
+# The GameMaster is a single global instance holding mutable game state, so all
+# state-touching endpoints are serialised.  This is a single-player server.
+_turn_lock = asyncio.Lock()
 
 
 def _get_gm() -> GameMaster:
@@ -101,35 +109,34 @@ async def health():
 async def api_start(body: dict = {}, auth=Depends(_require_auth)):
     """开始新游戏。支持自定义世界观和NPC。"""
     try:
-        # 开新游戏：销毁旧 GM 实例，清空记忆库，重建全新 GM
         global _gm
-        if _gm is not None:
-            _gm.memory.clear()
-        _gm = None
-        gm = _get_gm()
+        # 开新游戏：销毁旧 GM 实例并重建，清空上一局残留，再生成开场
+        async with _turn_lock:
+            _gm = None
+            gm = _get_gm()
+            gm.new_game_reset()
 
-        # 接收前端传入的自定义世界观和NPC
-        custom_worldview = body.get("worldview", "")
-        custom_npc_setup = body.get("npc_setup", "")
+            custom_worldview = body.get("worldview", "")
+            custom_npc_setup = body.get("npc_setup", "")
 
-        # 如果有自定义世界观，更新 GM 的世界状态，影响后续所有游戏流程
-        if custom_worldview.strip():
-            gm.world["description"] = custom_worldview.strip()
-            # 从描述中提取第一句作为世界名称（简化处理）
-            first_line = custom_worldview.strip().split("。")[0]
-            if first_line:
-                gm.world["name"] = first_line
+            # 如果有自定义世界观，更新 GM 的世界状态，影响后续所有游戏流程
+            if custom_worldview.strip():
+                gm.world["description"] = custom_worldview.strip()
+                # 从描述中提取第一句作为世界名称（简化处理）
+                first_line = custom_worldview.strip().split("。")[0]
+                if first_line:
+                    gm.world["name"] = first_line
 
-        opening = gm.generate_opening(
-            custom_worldview=custom_worldview,
-            custom_npc_setup=custom_npc_setup,
-        )
-        return {
-            "opening": opening,
-            "suggestions": gm._last_suggestions or _extract_suggestions(opening),
-            "state": gm.player_state.to_dict(),
-            "npcs": _get_scene_npcs(gm),
-        }
+            opening = gm.generate_opening(
+                custom_worldview=custom_worldview,
+                custom_npc_setup=custom_npc_setup,
+            )
+            return {
+                "opening": opening,
+                "suggestions": gm._last_suggestions or _extract_suggestions(opening),
+                "state": gm.player_state.to_dict(),
+                "npcs": _get_scene_npcs(gm),
+            }
     except Exception as e:
         return {"error": str(e)}
 
@@ -139,7 +146,8 @@ async def api_load(auth=Depends(_require_auth)):
     """加载存档。"""
     try:
         gm = _get_gm()
-        loaded = gm.load_save()
+        async with _turn_lock:
+            loaded = gm.load_save()
         if not loaded:
             return {"error": "没有找到存档"}
         return {
@@ -156,7 +164,8 @@ async def api_save(auth=Depends(_require_auth)):
     """保存游戏。"""
     try:
         gm = _get_gm()
-        gm.save()
+        async with _turn_lock:
+            gm.save()
         return {"saved": True}
     except Exception as e:
         return {"error": str(e)}
@@ -190,16 +199,7 @@ async def api_knowledge(auth=Depends(_require_auth)):
     """获取知识库条目（简化版，返回最近添加的条目）。"""
     try:
         gm = _get_gm()
-        results = gm.knowledge.search("", top_k=50)
-        entries = []
-        for r in results:
-            meta = r.get("metadata", {})
-            entries.append({
-                "content": r.get("content", ""),
-                "category": meta.get("category", "未分类"),
-                "known_by": meta.get("known_by", "所有人"),
-            })
-        return {"knowledge": entries}
+        return {"knowledge": gm.knowledge.list_all(limit=200)}
     except Exception as e:
         return {"error": str(e)}
 
@@ -255,34 +255,36 @@ async def api_action(body: dict, auth=Depends(_require_auth)):
     async def event_stream() -> AsyncGenerator[str, None]:
         gm = _get_gm()
 
-        async for chunk in gm.process_streaming(action):
-            if isinstance(chunk, StatusEvent):
-                data = json.dumps({
-                    'type': chunk.type,
-                    'tool': chunk.tool,
-                    'display': chunk.display,
-                    'result': chunk.result,
-                    'npc_name': chunk.npc_name,
-                    'npc_text': chunk.npc_text,
-                }, ensure_ascii=False)
-            elif chunk:
-                data = json.dumps({'text': chunk}, ensure_ascii=False)
-            else:
-                continue
-            yield f"data: {data}\n\n"
+        # Serialise turns: GameMaster state is not thread/task safe.
+        async with _turn_lock:
+            async for chunk in gm.process_streaming(action):
+                if isinstance(chunk, StatusEvent):
+                    data = json.dumps({
+                        'type': chunk.type,
+                        'tool': chunk.tool,
+                        'display': chunk.display,
+                        'result': chunk.result,
+                        'npc_name': chunk.npc_name,
+                        'npc_text': chunk.npc_text,
+                    }, ensure_ascii=False)
+                elif chunk:
+                    data = json.dumps({'text': chunk}, ensure_ascii=False)
+                else:
+                    continue
+                yield f"data: {data}\n\n"
 
-        # After streaming: send final state from GameMaster
-        response = gm._last_gm_response or ""
-        final = {
-            "done": True,
-            "suggestions": gm._last_suggestions or _extract_suggestions(response),
-            "state": gm.player_state.to_dict(),
-            "npcs": _get_scene_npcs(gm),
-            "gameOverPending": gm._game_over_pending,
-            "gameOverCause": gm._game_over_cause if gm._game_over_pending else "",
-        }
-        yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
+            # After streaming: send final state from GameMaster
+            response = gm._last_gm_response or ""
+            final = {
+                "done": True,
+                "suggestions": gm._last_suggestions or _extract_suggestions(response),
+                "state": gm.player_state.to_dict(),
+                "npcs": _get_scene_npcs(gm),
+                "gameOverPending": gm._game_over_pending,
+                "gameOverCause": gm._game_over_cause if gm._game_over_pending else "",
+            }
+            yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -297,7 +299,8 @@ async def api_confirm_game_over(auth=Depends(_require_auth)):
     """Confirm a pending game over — executes actual cleanup."""
     try:
         gm = _get_gm()
-        result = gm._confirm_game_over()
+        async with _turn_lock:
+            result = gm._confirm_game_over()
         return {"result": result, "gameOver": gm._game_over}
     except Exception as e:
         return {"error": str(e)}
@@ -308,7 +311,8 @@ async def api_cancel_game_over(auth=Depends(_require_auth)):
     """Cancel a pending game over — resumes gameplay."""
     try:
         gm = _get_gm()
-        result = gm._cancel_game_over()
+        async with _turn_lock:
+            result = gm._cancel_game_over()
         return {"result": result}
     except Exception as e:
         return {"error": str(e)}
@@ -333,21 +337,6 @@ def _get_scene_npcs(gm: GameMaster) -> list[dict]:
             "max_hp": state_dict.get("max_hp", 10),
         })
     return npcs
-
-
-def _split_sentences(text: str) -> list[str]:
-    """Split text into sentences for streaming effect."""
-    import re
-    # Split by Chinese/English sentence endings
-    parts = re.split(r'([。！？；\n]+)', text)
-    sentences = []
-    for i in range(0, len(parts), 2):
-        sentence = parts[i]
-        if i + 1 < len(parts):
-            sentence += parts[i + 1]
-        if sentence.strip():
-            sentences.append(sentence)
-    return sentences
 
 
 def _extract_suggestions(text: str) -> list[str]:

@@ -75,6 +75,7 @@ def build_narrator_input(
     npc_responses: str = "",
     knowledge_results: str = "",
     world_setting: str = "",
+    raw_results: str = "",
 ) -> str:
     """Build the input message for the Narrator Agent.
 
@@ -111,6 +112,9 @@ def build_narrator_input(
 
     if knowledge_results:
         parts.append(f"\n## 相关知识\n{knowledge_results}")
+
+    if raw_results:
+        parts.append(f"\n## 全部结果\n{raw_results}")
 
     parts.append(
         "\n请基于以上所有信息，生成场景叙述和3个行动建议。"

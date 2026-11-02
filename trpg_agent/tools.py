@@ -5,9 +5,7 @@ Phase 1: invoke_npc uses legacy LLM.chat() internally.
 Phase 2: invoke_npc routes to real NPC Agents with autonomous decision-making.
 """
 
-import os
 import asyncio
-import glob
 import re
 import time
 
@@ -16,6 +14,7 @@ from agents import RunContextWrapper, function_tool, Runner
 from trpg_agent.dice import roll as dice_roll
 from trpg_agent.check import difficulty_check as check_dc, skill_check as check_skill
 from trpg_agent.state import StateMachine, calc_max_hp
+from trpg_agent.npc import generate_npc_attributes as _generate_npc_attributes
 
 # Import GameContext for type hinting (avoid circular import)
 from trpg_agent.agent_config import GameContext
@@ -114,7 +113,7 @@ def get_player_state(ctx: RunContextWrapper[GameContext]) -> str:
             f"信任 {ps['trust']} | "
             f"体力 {ps['stamina']}"
         )
-    return _cached("player_state", ctx.context.player_name, _produce)
+    return _produce()
 
 
 @function_tool
@@ -141,50 +140,12 @@ def get_npc_state(ctx: RunContextWrapper[GameContext], name: str) -> str:
             f"体力 {ns['stamina']} | "
             f"存活: {'是' if ns['alive'] else '否'}"
         )
-    return _cached("npc_state", name, _produce)
+    return _produce()
 
 
 # ---------------------------------------------------------------------------
 # NPC management tools
 # ---------------------------------------------------------------------------
-
-def _generate_npc_attributes(
-    llm, name: str, core: list[str], personality_tone: str
-) -> dict[str, int]:
-    """Generate NPC attributes based on role description via LLM. (internal helper)"""
-    if llm is None:
-        return {
-            "力量": 10, "敏捷": 10, "体质": 10,
-            "智力": 10, "感知": 10, "魅力": 10,
-        }
-
-    core_text = "\n".join(core)
-    try:
-        result = llm.chat_json(
-            system=(
-                "你是TRPG角色设计师。根据角色描述，为该角色分配合理的属性值（1-20范围）。"
-                "属性包括：力量、敏捷、体质、智力、感知、魅力。请根据角色特点合理分配，"
-                "不要所有属性都一样。以JSON格式返回："
-                "{\"力量\": 12, \"敏捷\": 10, \"体质\": 11, \"智力\": 14, \"感知\": 13, \"魅力\": 8}"
-            ),
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"角色名称: {name}\n角色描述: {core_text}\n语调: {personality_tone}\n\n请为该角色分配属性。",
-                }
-            ],
-        )
-        attrs = {}
-        for key in ["力量", "敏捷", "体质", "智力", "感知", "魅力"]:
-            val = result.get(key, 10)
-            attrs[key] = max(1, min(20, int(val)))
-        return attrs
-    except Exception:
-        return {
-            "力量": 10, "敏捷": 10, "体质": 10,
-            "智力": 10, "感知": 10, "魅力": 10,
-        }
-
 
 @function_tool
 def create_npc(
@@ -301,7 +262,7 @@ def set_scene(
     if present_npcs:
         npc_list = [n.strip() for n in present_npcs.split(",") if n.strip()]
         if npc_list:
-            game_ctx.scene_npcs = npc_list
+            game_ctx.scene_npcs[:] = npc_list
             changes.append(f"在场NPC: {', '.join(game_ctx.scene_npcs)}")
 
     if time_of_day:
@@ -333,12 +294,18 @@ def combat_attack(ctx: RunContextWrapper[GameContext], target: str) -> str:
     if target_npc is None:
         return f"错误: 场景中找不到 NPC「{target}」"
 
+    existing_state = game_ctx.npc_store.get_state(target)
+    if existing_state is not None and not existing_state.alive:
+        return f"「{target}」已经倒下，无需再攻击"
+
     if target not in game_ctx.scene_npcs:
         game_ctx.scene_npcs.append(target)
 
     # Attack roll
     attack_result = check_dc(dc=12)
     roll_val = attack_result["roll"]
+
+    game_ctx.player_state.apply("combat")  # 战斗消耗体力
 
     if not attack_result["success"]:
         # Counter-attack
@@ -380,6 +347,40 @@ def combat_attack(ctx: RunContextWrapper[GameContext], target: str) -> str:
         game_ctx.debug_log.append(f"[工具] combat_attack: {target} | d20={roll_val} | {'命中' if attack_result['success'] else '落空'}")
 
     return result
+
+
+@function_tool
+def take_rest(ctx: RunContextWrapper[GameContext], hours: int = 1) -> str:
+    """Rest to recover HP and stamina.
+
+    Call ONLY when the player explicitly rests, sleeps, or binds/treats wounds.
+
+    Args:
+        hours: How long the player rests (1-8).
+    """
+    game_ctx = ctx.context
+    try:
+        hours = max(1, min(8, int(hours or 1)))
+    except (TypeError, ValueError):
+        hours = 1
+
+    ps = game_ctx.player_state
+    before_hp = ps.hp
+    before_stamina = ps.get_state()["stamina"]
+
+    # Cap the heal so a single rest cannot top a character off from 1 HP.
+    _, healed = dice_roll(f"{min(hours, 4)}d4")
+    ps.restore_hp(healed)
+    for _ in range(2 if hours >= 4 else 1):
+        ps.apply("rested")
+
+    after = ps.get_state()
+    if game_ctx.debug:
+        game_ctx.debug_log.append(f"[工具] take_rest: {hours}h +{healed}HP")
+    return (
+        f"休息 {hours} 小时后恢复 {after['hp'] - before_hp} 点 HP "
+        f"(HP {after['hp']}/{after['max_hp']})｜体力 {before_stamina} → {after['stamina']}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -461,58 +462,9 @@ def game_over(ctx: RunContextWrapper[GameContext], cause: str) -> str:
     return f"游戏即将结束: {cause}。输入 /confirm 确认结束，或任何其他输入取消。"
 
 
-@function_tool
-def confirm_game_over(ctx: RunContextWrapper[GameContext]) -> str:
-    """Execute the actual game-over cleanup after player confirmation."""
-    game_ctx = ctx.context
-
-    if not game_ctx.game_over_pending:
-        return "没有待确认的游戏结束。"
-
-    # Delete save file
-    if os.path.exists("data/save.json"):
-        os.remove("data/save.json")
-
-    # Clear NPC state files
-    for f in glob.glob("data/chroma/npcs/*_state.json"):
-        try:
-            os.remove(f)
-        except Exception:
-            pass
-
-    # Clear run-time state
-    game_ctx.scene_npcs.clear()
-    game_ctx.time_of_day = "黄昏"
-    game_ctx.weather = "阴"
-
-    # Clear all memory collections
-    try:
-        all_ids = game_ctx.memory._collection.get()["ids"]
-        if all_ids:
-            game_ctx.memory._collection.delete(ids=all_ids)
-    except Exception:
-        pass
-    try:
-        all_npc_ids = game_ctx.memory._npc_collection.get()["ids"]
-        if all_npc_ids:
-            game_ctx.memory._npc_collection.delete(ids=all_npc_ids)
-    except Exception:
-        pass
-
-    game_ctx.game_over = True
-    game_ctx.game_over_pending = False
-    return f"游戏结束: {game_ctx.game_over_cause}。冒险终结。"
-
-
-@function_tool
-def cancel_game_over(ctx: RunContextWrapper[GameContext]) -> str:
-    """Cancel a pending game-over, resuming normal gameplay."""
-    game_ctx = ctx.context
-    if not game_ctx.game_over_pending:
-        return "没有待确认的游戏结束。"
-    game_ctx.game_over_pending = False
-    game_ctx.game_over_cause = ""
-    return "已取消游戏结束。冒险继续。"
+# NOTE: the actual confirm/cancel cleanup lives in GameMaster._confirm_game_over()
+# / _cancel_game_over().  Duplicating it here used to mutate GameContext instead of
+# the GameMaster and silently diverged — do not re-add those tools.
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +490,11 @@ async def invoke_npc(ctx: RunContextWrapper[GameContext], name: str, prompt: str
     if not name:
         return "错误: 未指定 NPC 名称"
 
+    return await _respond_as_npc(game_ctx, name, prompt)
+
+
+async def _respond_as_npc(game_ctx: GameContext, name: str, prompt: str) -> str:
+    # Single NPC response path shared by invoke_npc / invoke_npcs.
     npc = game_ctx.npc_store.find_by_name(name)
     if npc is None:
         return f"场景中找不到 NPC「{name}」。请先使用 create_npc 创建。"
@@ -632,7 +589,7 @@ async def invoke_npcs(
         if not name or not prompt:
             return f'{npc_call.get("name", "?")}: "(缺少 name 或 prompt)"'
         try:
-            return await invoke_npc(ctx, name, prompt)
+            return await _respond_as_npc(game_ctx, name, prompt)
         except Exception as e:
             if game_ctx.debug:
                 game_ctx.debug_log.append(f"[NPC] {name} 并行调用失败: {e}")
@@ -675,21 +632,26 @@ async def invoke_judge(
     if judge is None:
         return "Judge Agent 未初始化"
 
-    # Build minimal input for Judge
+    # Build the Judge input (skills/attributes are required to pick a check)
+    from trpg_agent.judge import build_judge_input
+
     state = game_ctx.player_state.get_state() if game_ctx.player_state else {}
     scene = (
         f"时间: {game_ctx.time_of_day}, 天气: {game_ctx.weather}, "
         f"场景NPC: {', '.join(game_ctx.scene_npcs) or '无'}"
     )
-    input_text = (
-        f"## 场景\n{scene}\n\n"
-        f"## 玩家\nHP {state.get('hp', '?')}/{state.get('max_hp', '?')}\n\n"
-        f"## 玩家行动\n{action_description}\n\n"
-        f"请判断这个行动是否需要检定，如果需要，执行对应的检定工具。"
+    input_text = build_judge_input(
+        player_action=action_description,
+        player_name=game_ctx.player_name,
+        player_skills=game_ctx.player_skills,
+        player_attributes=game_ctx.player_attributes,
+        scene_context=scene,
+        hp_info=f"HP {state.get('hp', '?')}/{state.get('max_hp', '?')}",
     )
 
     try:
-        result = await Runner.run(judge, input=input_text, max_turns=3)
+        # context= is required: Judge tools read ctx.context (skill_check / combat_attack)
+        result = await Runner.run(judge, input=input_text, context=game_ctx, max_turns=3)
         output = result.final_output
         if game_ctx.debug:
             game_ctx.debug_log.append(f"[Judge] 行动: {action_description[:60]}... → {output[:80]}")
@@ -720,15 +682,18 @@ async def invoke_narrator(
     if narrator is None:
         return "Narrator Agent 未初始化"
 
+    from trpg_agent.narrator import build_narrator_input
+
     scene = (
         f"时间: {game_ctx.time_of_day}, 天气: {game_ctx.weather}, "
         f"场景NPC: {', '.join(game_ctx.scene_npcs) or '无'}"
     )
-    input_text = (
-        f"## 当前场景\n{scene}\n\n"
-        f"## 所有结果\n{all_results}\n\n"
-        f"请基于以上信息，生成场景叙述和3个行动建议。"
-        f"严格按照 JSON 格式输出。"
+    input_text = build_narrator_input(
+        player_action=game_ctx.player_action,
+        player_name=game_ctx.player_name,
+        scene_context=scene,
+        raw_results=all_results,
+        world_setting=game_ctx.world_setting,
     )
 
     try:
@@ -802,7 +767,13 @@ async def broadcast_event(
         )
 
         try:
-            result = await Runner.run(agent, input=npc_input, max_turns=3)
+            # context= is required: the NPC's search_npc_memory tool reads ctx.context
+            result = await Runner.run(
+                agent,
+                input=npc_input,
+                context={"memory": game_ctx.memory, "npc_name": name},
+                max_turns=3,
+            )
             response = result.final_output.strip()
             if response and response.lower() != "<silent>":
                 # Record in NPC history

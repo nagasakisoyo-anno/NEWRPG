@@ -6,9 +6,7 @@ WorldBuilder 允许玩家/GM 用自然语言描述角色或世界设定，
 
 from __future__ import annotations
 
-import json
-import os
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from trpg_agent.llm import LLM
@@ -192,9 +190,9 @@ class WorldBuilder:
             "你是一个 TRPG 世界构建助手。将玩家的自然语言描述提炼为精炼的世界观知识条目。\n"
             "保持描述简洁（不超过200字），保留关键信息（地点、人物、组织、历史事件等）。\n"
             "如果描述中包含多个独立知识点，请分别提炼为独立的条目。\n"
-            "以 JSON 数组格式返回，每个条目一个字符串：\n"
-            '["知识条目1", "知识条目2", ...]\n'
-            "如果只有一个条目，也返回数组格式。"
+            "以 JSON 对象格式返回，把每条知识放进 knowledge 数组：\n"
+            '{"knowledge": ["知识条目1", "知识条目2"]}\n'
+            "如果只有一个条目，也用单元素数组。"
         )
         messages = [{"role": "user", "content": f"请提炼以下世界观描述：\n{description}"}]
 

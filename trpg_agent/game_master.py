@@ -28,12 +28,16 @@ import yaml
 
 from agents import Runner
 
-from trpg_agent.event_stream import StatusEvent, make_tool_event, AgentStatusHooks
+from trpg_agent.event_stream import StatusEvent, AgentStatusHooks
 from trpg_agent.agent_config import (
     GameContext,
     configure_deepseek,
     create_gm_agent,
     build_gm_instructions,
+)
+from trpg_agent.orchestrator import (
+    build_orchestrator_instructions,
+    build_orchestrator_input,
 )
 from trpg_agent.character import Character
 from trpg_agent.dice import roll
@@ -92,9 +96,12 @@ class GameMaster:
         self.player = Character.load(config_path)
 
         # -- World (from config) --
+        config_data: Dict[str, Any] = {}
         try:
             with open(config_path, "r", encoding="utf-8") as f:
-                config_data = yaml.safe_load(f)
+                loaded = yaml.safe_load(f)
+            if isinstance(loaded, dict):
+                config_data = loaded
             self.world: Dict[str, Any] = config_data.get("world", {})
         except Exception:
             self.world = {}
@@ -115,9 +122,15 @@ class GameMaster:
         status("初始化知识库 (ChromaDB)...")
         self.knowledge = KnowledgeBase()
 
-        # -- Load knowledge files --
+        # -- Load knowledge files (config.yaml knowledge.files wins when set) --
         status("加载世界知识文件并建立索引...")
-        self.knowledge.load_from_dir(knowledge_dir)
+        knowledge_paths = [knowledge_dir]
+        if knowledge_dir == "data/knowledge":
+            cfg_files = (config_data.get("knowledge") or {}).get("files") or []
+            if isinstance(cfg_files, list) and cfg_files:
+                knowledge_paths = [str(p) for p in cfg_files]
+        for kp in knowledge_paths:
+            self.knowledge.load_from_dir(kp)
 
         # -- Recent events queue --
         self._recent_events: deque = deque(maxlen=10)
@@ -288,33 +301,10 @@ class GameMaster:
 
         Falls back to balanced defaults (10) if LLM is unavailable.
         """
-        if not self._llm_available or not self.llm:
-            return {
-                "力量": 10, "敏捷": 10, "体质": 10,
-                "智力": 10, "感知": 10, "魅力": 10,
-            }
+        from trpg_agent.npc import generate_npc_attributes
 
-        core_text = "\n".join(core)
-        try:
-            result = self.llm.chat_json(
-                system="你是TRPG角色设计师。根据角色描述，为该角色分配合理的属性值（1-20范围）。属性包括：力量、敏捷、体质、智力、感知、魅力。请根据角色特点合理分配，不要所有属性都一样。以JSON格式返回：{\"力量\": 12, \"敏捷\": 10, \"体质\": 11, \"智力\": 14, \"感知\": 13, \"魅力\": 8}",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": f"角色名称: {name}\n角色描述: {core_text}\n语调: {personality_tone}\n\n请为该角色分配属性。",
-                    }
-                ],
-            )
-            attrs = {}
-            for key in ["力量", "敏捷", "体质", "智力", "感知", "魅力"]:
-                val = result.get(key, 10)
-                attrs[key] = max(1, min(20, int(val)))
-            return attrs
-        except Exception:
-            return {
-                "力量": 10, "敏捷": 10, "体质": 10,
-                "智力": 10, "感知": 10, "魅力": 10,
-            }
+        llm = self.llm if self._llm_available else None
+        return generate_npc_attributes(llm, name, core, personality_tone)
 
     def _register_backstory_npcs(self) -> None:
         """Extract and register NPCs from the player's backstory using LLM."""
@@ -339,9 +329,9 @@ class GameMaster:
             "从以下TRPG角色背景和剧本中提取所有有名字、有身份的NPC。\n"
             "已故角色不要提取。路人描述不要提取。\n"
             "主角的关系列表中已声明的NPC必须提取。剧本关键NPC必须提取。如果有重复的，合并为一个。\n"
-            "以 JSON 数组格式返回，每个NPC包含 name, core, personality_tone, relations。\n"
-            '示例: [{"name": "艾莉西亚", "core": ["玩家的妹妹"], '
-            '"personality_tone": "温柔但倔强", "relations": {"罗恩·瓦尔特": "哥哥"}}]'
+            "以 JSON 对象格式返回，形如 {\"npcs\": [{\"name\": ..., \"core\": [...], \"personality_tone\": ..., \"relations\": {...}}]}，每个NPC包含 name, core, personality_tone, relations。\n"
+            '示例: {"npcs": [{"name": "艾莉西亚", "core": ["玩家的妹妹"], '
+            '"personality_tone": "温柔但倔强", "relations": {"罗恩·瓦尔特": "哥哥"}}]}'
         )
         user_content = f"主角: {self.player.name}\n背景:\n锚: {anchor}\n核心:\n{core_text}\n\n主角的关系:\n{rel_text}"
         if scenario_text:
@@ -352,7 +342,7 @@ class GameMaster:
 
         try:
             result = self.llm.chat_json(system=system, messages=messages)
-            npcs = result if isinstance(result, list) else result.get("npcs", [])
+            npcs = result.get("npcs", []) if isinstance(result, dict) else []
             if not isinstance(npcs, list):
                 npcs = []
 
@@ -533,7 +523,7 @@ class GameMaster:
 
         return "\n\n".join(parts)
 
-    def _build_game_context(self) -> GameContext:
+    def _build_game_context(self, player_action: str = "") -> GameContext:
         """Build the GameContext dataclass with current game state."""
         return GameContext(
             player_state=self.player_state,
@@ -558,7 +548,87 @@ class GameMaster:
             debug=self.debug,
             debug_log=[],
             recent_events=list(self._recent_events),
+            player_action=player_action,
+            world_setting=self.world.get("description", self.world.get("name", "")),
         )
+
+    def _sync_from_context(self, game_ctx: GameContext) -> None:
+        """Copy state mutated inside tool calls back onto the GameMaster."""
+        self.scene_npcs[:] = list(game_ctx.scene_npcs)
+        self._time_of_day = game_ctx.time_of_day
+        self._weather = game_ctx.weather
+        self._game_over = game_ctx.game_over
+        self._game_over_pending = game_ctx.game_over_pending
+        self._game_over_cause = game_ctx.game_over_cause
+
+    @staticmethod
+    def _parse_gm_output(raw: str) -> tuple[str, list[str]]:
+        """Extract (narration, suggestions) from a model reply.
+
+        Shared by the multi-agent, legacy and streaming pipelines so the three
+        paths can never drift apart again.  Accepts plain JSON, fenced JSON,
+        JSON embedded in prose, and finally bare numbered suggestion lines.
+        """
+        text = (raw or "").strip()
+        if not text:
+            return "", []
+
+        candidates = [text]
+        fence = re.match(r'^```(?:json)?\s*\n?(.*?)\n?```$', text, re.DOTALL)
+        if fence:
+            candidates.append(fence.group(1).strip())
+
+        def _as_pair(obj: object) -> tuple[str, list[str]] | None:
+            if not isinstance(obj, dict):
+                return None
+            narration = obj.get("narration")
+            if not isinstance(narration, str) or not narration.strip():
+                return None
+            suggestions = obj.get("suggestions")
+            return narration, suggestions if isinstance(suggestions, list) else []
+
+        for cand in candidates:
+            try:
+                pair = _as_pair(json.loads(cand))
+            except (json.JSONDecodeError, TypeError):
+                pair = None
+            if pair:
+                return pair
+
+        embedded = re.search(r'\{[^{}]*"narration"[^{}]*\}', text, re.DOTALL)
+        if embedded:
+            try:
+                pair = _as_pair(json.loads(embedded.group(0)))
+            except (json.JSONDecodeError, TypeError):
+                pair = None
+            if pair:
+                return pair
+
+        keep: list[str] = []
+        suggestions: list[str] = []
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if re.match(r'^\d+\.\s+', stripped):
+                suggestions.append(re.sub(r'^\d+\.\s+', '', stripped))
+            elif stripped.startswith("**建议"):
+                continue
+            else:
+                keep.append(line)
+
+        narration = "\n".join(keep).strip() or text
+        return narration, suggestions
+
+    @staticmethod
+    def _clean_narration(text: str) -> str:
+        """Drop trailing suggestion blocks so memories never store UI hints."""
+        lines = (text or "").split("\n")
+        keep: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("**建议") or stripped.startswith("建议："):
+                break
+            keep.append(line)
+        return "\n".join(keep).strip()
 
     def _format_history(self) -> str:
         """Format recent conversation history for context."""
@@ -639,24 +709,26 @@ class GameMaster:
             f"HP {state['hp']}/{state['max_hp']}  情绪 {state['emotion']}  "
             f"信任 {state['trust']}  体力 {state['stamina']}"
         )
-        orch_input = (
-            f"## 当前状态\n{scene_info}\n\n"
-            f"## 玩家 {self.player.name}\n{user_input}"
+        orch_input = build_orchestrator_input(
+            player_input=user_input,
+            player_name=self.player.name,
+            scene_context=scene_info,
+            history_text=self._format_history(),
+            last_gm_response=self._last_gm_response,
         )
 
         # GameContext with sub-agents
-        game_ctx = self._build_game_context()
+        game_ctx = self._build_game_context(player_action=user_input)
 
-        # Update Orchestrator instructions
-        self._orchestrator_agent.instructions = (
-            build_gm_instructions(  # reuse existing prompt builder for world/player info
-                world_setting=self.world.get("description", ""),
-                player_name=self.player.name,
-                player_card=self.player.summary(),
-                time_of_day=self._time_of_day,
-                weather=self._weather,
-                scene_npcs=scene_npcs_text,
-            )
+        # The Orchestrator is a ROUTER: give it the routing prompt, not the GM
+        # narrative prompt (that one demands JSON output and tools it lacks).
+        self._orchestrator_agent.instructions = build_orchestrator_instructions(
+            time_of_day=self._time_of_day,
+            weather=self._weather,
+            scene_npcs=scene_npcs_text,
+            world_setting=self.world.get("description", self.world.get("name", "")),
+            player_name=self.player.name,
+            player_card=self.player.summary(),
         )
 
         # ---- Run Orchestrator ----
@@ -676,16 +748,7 @@ class GameMaster:
         elapsed_ms = int((time.time() - t0) * 1000)
 
         # ---- Parse JSON output (from Narrator, relayed by Orchestrator) ----
-        self._last_suggestions = []
-        narration = response
-        try:
-            parsed = json.loads(response.strip())
-            if isinstance(parsed, dict):
-                narration = parsed.get("narration", response)
-                self._last_suggestions = parsed.get("suggestions", [])
-        except (json.JSONDecodeError, TypeError):
-            # Fallback: treat entire response as narration
-            narration = response
+        narration, self._last_suggestions = self._parse_gm_output(response)
 
         if self.debug:
             self._debug(f"[Orch] 完成  |  耗时 {elapsed_ms}ms  |  输出 {len(response)}字符  |  "
@@ -699,11 +762,7 @@ class GameMaster:
         self._trim_history()
 
         # ---- State sync ----
-        self._time_of_day = game_ctx.time_of_day
-        self._weather = game_ctx.weather
-        self._game_over = game_ctx.game_over
-        self._game_over_pending = game_ctx.game_over_pending
-        self._game_over_cause = game_ctx.game_over_cause
+        self._sync_from_context(game_ctx)
 
         # ---- Memory ----
         if not self._game_over and narration:
@@ -762,7 +821,12 @@ class GameMaster:
                 memory=self.memory,
             )
             try:
-                result = await Runner.run(agent, input=npc_input, max_turns=2)
+                result = await Runner.run(
+                    agent,
+                    input=npc_input,
+                    context={"memory": self.memory, "npc_name": name},
+                    max_turns=2,
+                )
                 response = result.final_output.strip()
                 if response and response.lower() != "<silent>":
                     self.npc_store.append_history(name, "user", "[时间流逝]")
@@ -842,7 +906,7 @@ class GameMaster:
         self._debug(f"[GM] 场景: {scene_npcs_text}  |  {self._time_of_day}  ·  {self._weather}")
 
         input_text = self._build_input(user_input)
-        game_ctx = self._build_game_context()
+        game_ctx = self._build_game_context(player_action=user_input)
 
         # -- Tool Advisor: lightweight suggestion before GM acts --
         t0_advice = time.time()
@@ -881,49 +945,7 @@ class GameMaster:
         elapsed_ms = int((time.time() - t0) * 1000)
 
         # ---- Parse JSON output: narration + suggestions ----
-        self._last_suggestions = []
-        narration = response  # fallback
-        try:
-            parsed = json.loads(response.strip())
-            if isinstance(parsed, dict):
-                narration = parsed.get("narration", response)
-                self._last_suggestions = parsed.get("suggestions", [])
-        except (json.JSONDecodeError, TypeError):
-            # Try markdown code block extraction
-            stripped = response.strip()
-            code_block_match = re.match(r'^```(?:json)?\s*\n?(.*?)\n?```$', stripped, re.DOTALL)
-            if code_block_match:
-                try:
-                    parsed = json.loads(code_block_match.group(1).strip())
-                    if isinstance(parsed, dict):
-                        narration = parsed.get("narration", code_block_match.group(1))
-                        self._last_suggestions = parsed.get("suggestions", [])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            # Try to find JSON object in the text
-            if narration == response and not self._last_suggestions:
-                json_match = re.search(r'\{[^{}]*"narration"[^{}]*\}', stripped, re.DOTALL)
-                if json_match:
-                    try:
-                        parsed = json.loads(json_match.group(0))
-                        if isinstance(parsed, dict):
-                            narration = parsed.get("narration", response)
-                            self._last_suggestions = parsed.get("suggestions", [])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-            # Last resort: strip numbered suggestion lines from narration
-            if narration == response:
-                lines = narration.strip().split('\n')
-                clean_lines = []
-                suggestion_lines = []
-                for line in lines:
-                    if re.match(r'^\d+\.\s+', line.strip()):
-                        suggestion_lines.append(re.sub(r'^\d+\.\s+', '', line.strip()))
-                    else:
-                        clean_lines.append(line)
-                if suggestion_lines:
-                    narration = '\n'.join(clean_lines).strip()
-                    self._last_suggestions = suggestion_lines
+        narration, self._last_suggestions = self._parse_gm_output(response)
 
         # ---- Debug: aggregate tool-level entries ----
         if self.debug:
@@ -938,21 +960,17 @@ class GameMaster:
         self._trim_history()
 
         # ---- Sync GameContext state back from potentially-mutated dataclass ----
-        self._time_of_day = game_ctx.time_of_day
-        self._weather = game_ctx.weather
-        self._game_over = game_ctx.game_over
-        self._game_over_pending = game_ctx.game_over_pending
-        self._game_over_cause = game_ctx.game_over_cause
+        self._sync_from_context(game_ctx)
 
         # ---- Write memory (always persist; the Agent decides what matters via actions) ----
-        if not self._game_over and response:
+        if not self._game_over and narration:
             try:
-                self._write_memory(user_input, response, [])
+                self._write_memory(user_input, self._clean_narration(narration), [])
                 # Write NPC memories for NPCs that were invoked during this turn
                 for npc_name in game_ctx.scene_npcs:
                     combined = (
                         f"以下事件与{npc_name}相关，请从{npc_name}的视角提取记忆:\n"
-                        f"玩家: {user_input}\n事件: {response[:300]}"
+                        f"玩家: {user_input}\n事件: {self._clean_narration(narration)[:300]}"
                     )
                     self._write_npc_memory(npc_name, combined)
             except Exception as e:
@@ -991,6 +1009,14 @@ class GameMaster:
 
         self._last_user_input = user_input
 
+        # ---- Game over confirmation gate ----
+        if self._game_over_pending:
+            if user_input.lower() in ("/confirm", "确认"):
+                yield self._confirm_game_over()
+            else:
+                yield self._cancel_game_over()
+            return
+
         # ---- Command routing ----
         if self.world_builder and user_input.startswith("!"):
             world_result = self._handle_world_builder_command(user_input)
@@ -1015,7 +1041,7 @@ class GameMaster:
         self._debug(f"[GM] 场景: {scene_npcs_text}  |  {self._time_of_day}  ·  {self._weather}")
 
         input_text = self._build_input(user_input)
-        game_ctx = self._build_game_context()
+        game_ctx = self._build_game_context(player_action=user_input)
 
         # -- Tool Advisor --
         t0_advice = time.time()
@@ -1080,54 +1106,7 @@ class GameMaster:
         elapsed_ms = int((time.time() - t0) * 1000)
 
         # ---- Parse JSON output: narration + suggestions ----
-        self._last_suggestions = []
-        narration = full_response  # fallback: use raw text
-        try:
-            parsed = json.loads(full_response.strip())
-            if isinstance(parsed, dict):
-                narration = parsed.get("narration", full_response)
-                self._last_suggestions = parsed.get("suggestions", [])
-        except (json.JSONDecodeError, TypeError):
-            # JSON parse failed — try to extract content from raw LLM output
-            # Strip markdown code blocks if present (```json ... ```)
-            stripped = full_response.strip()
-            code_block_match = re.match(r'^```(?:json)?\s*\n?(.*?)\n?```$', stripped, re.DOTALL)
-            if code_block_match:
-                try:
-                    parsed = json.loads(code_block_match.group(1).strip())
-                    if isinstance(parsed, dict):
-                        narration = parsed.get("narration", code_block_match.group(1))
-                        self._last_suggestions = parsed.get("suggestions", [])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            # If still not parsed, try to find JSON object in the text
-            if narration == full_response and not self._last_suggestions:
-                json_match = re.search(r'\{[^{}]*"narration"[^{}]*\}', stripped, re.DOTALL)
-                if json_match:
-                    try:
-                        parsed = json.loads(json_match.group(0))
-                        if isinstance(parsed, dict):
-                            narration = parsed.get("narration", full_response)
-                            self._last_suggestions = parsed.get("suggestions", [])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
-            # Last resort: strip out numbered suggestion lines from raw text
-            # so they don't appear in the chat bubble
-            if narration == full_response:
-                # Remove lines like "1. xxx" or "2. xxx" from the end of narration
-                lines = narration.strip().split('\n')
-                clean_lines = []
-                suggestion_lines = []
-                for line in lines:
-                    if re.match(r'^\d+\.\s+', line.strip()):
-                        suggestion_lines.append(re.sub(r'^\d+\.\s+', '', line.strip()))
-                    else:
-                        clean_lines.append(line)
-                if suggestion_lines:
-                    narration = '\n'.join(clean_lines).strip()
-                    self._last_suggestions = suggestion_lines
+        narration, self._last_suggestions = self._parse_gm_output(full_response)
 
         if self.debug:
             self._debug(f"[GM] Runner 完成  |  耗时 {elapsed_ms}ms  |  "
@@ -1147,19 +1126,15 @@ class GameMaster:
         self.history_messages.append({"role": "assistant", "content": full_response})
         self._trim_history()
 
-        self._time_of_day = game_ctx.time_of_day
-        self._weather = game_ctx.weather
-        self._game_over = game_ctx.game_over
-        self._game_over_pending = game_ctx.game_over_pending
-        self._game_over_cause = game_ctx.game_over_cause
+        self._sync_from_context(game_ctx)
 
-        if not self._game_over and full_response:
+        if not self._game_over and narration:
             try:
-                self._write_memory(user_input, full_response, [])
+                self._write_memory(user_input, self._clean_narration(narration), [])
                 for npc_name in game_ctx.scene_npcs:
                     combined = (
                         f"以下事件与{npc_name}相关，请从{npc_name}的视角提取记忆:\n"
-                        f"玩家: {user_input}\n事件: {full_response[:300]}"
+                        f"玩家: {user_input}\n事件: {self._clean_narration(narration)[:300]}"
                     )
                     self._write_npc_memory(npc_name, combined)
             except Exception as e:
@@ -1178,7 +1153,7 @@ class GameMaster:
                 f"体力 {state['stamina']}  |  在场 {self.scene_npcs or '无'}"
             )
 
-        self._last_gm_response = full_response
+        self._last_gm_response = narration
 
     def _rebuild_response(
         self, user_input: str, tool_results: List[str], involved_npcs: List[str]
@@ -1706,6 +1681,9 @@ class GameMaster:
             if self.debug and npcs:
                 print(f"[DEBUG] 开局创建 NPC: {[n.get('name') for n in npcs]}")
 
+            # Seed NPCs created above need Agents before the first turn
+            self._sync_npc_agents()
+
             # Treat opening as first GM output — write memory + set context
             self._last_suggestions = suggestions
             self._last_gm_response = narration
@@ -1785,6 +1763,52 @@ class GameMaster:
         self._game_over_pending = False
         self._game_over_cause = ""
         return "已取消游戏结束。冒险继续。"
+
+    def new_game_reset(self) -> None:
+        """Wipe every trace of the previous run so a new game starts clean.
+
+        Without this, starting a new game only cleared the vector memories:
+        NPC cards and their state files survived in ChromaDB and came straight
+        back on the next start, dragging the previous run's cast along.
+        """
+        try:
+            self.memory.clear()
+        except Exception as e:
+            self._debug(f"[重置] 记忆清理失败: {e}")
+
+        try:
+            self.npc_store.clear_all()
+        except Exception as e:
+            self._debug(f"[重置] NPC 清理失败: {e}")
+
+        self._npc_agents.clear()
+        self.scene_npcs.clear()
+        self.history_messages.clear()
+        self._recent_events.clear()
+        self._last_gm_response = ""
+        self._last_suggestions = []
+        self._turn_count = 0
+        self._last_scene_context = ""
+        self._game_over = False
+        self._game_over_pending = False
+        self._game_over_cause = ""
+        self._time_of_day = "清晨"
+        self._weather = "薄雾"
+        self.player_state = StateMachine(max_hp=calc_max_hp(self.player.attributes))
+
+        # A new game invalidates the old save file
+        try:
+            if os.path.exists("data/save.json"):
+                os.remove("data/save.json")
+        except OSError:
+            pass
+
+        # Re-seed NPCs from the player's backstory / scenario
+        if self._llm_available:
+            self._register_backstory_npcs()
+            # Freshly seeded NPCs need their own Agents too, otherwise every
+            # invoke_npc would silently fall back to the legacy LLM path.
+            self._sync_npc_agents()
 
     # ------------------------------------------------------------------
 

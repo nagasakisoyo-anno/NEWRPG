@@ -218,6 +218,44 @@ def load_npc(config_path: str) -> NPCCharacter:
     )
 
 
+_DEFAULT_NPC_ATTRIBUTES = {
+    "力量": 10, "敏捷": 10, "体质": 10,
+    "智力": 10, "感知": 10, "魅力": 10,
+}
+
+
+def generate_npc_attributes(
+    llm, name: str, core: List[str], personality_tone: str
+) -> Dict[str, int]:
+    # Ask the LLM for believable attribute values; fall back to balanced 10s.
+    if llm is None:
+        return dict(_DEFAULT_NPC_ATTRIBUTES)
+
+    core_text = "\n".join(core)
+    try:
+        result = llm.chat_json(
+            system=(
+                "你是TRPG角色设计师。根据角色描述，为该角色分配合理的属性值（1-20范围）。"
+                "属性包括：力量、敏捷、体质、智力、感知、魅力。请根据角色特点合理分配，"
+                "不要所有属性都一样。以JSON格式返回："
+                "{\"力量\": 12, \"敏捷\": 10, \"体质\": 11, \"智力\": 14, \"感知\": 13, \"魅力\": 8}"
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"角色名称: {name}\n角色描述: {core_text}\n语调: {personality_tone}\n\n请为该角色分配属性。",
+                }
+            ],
+        )
+        attrs: Dict[str, int] = {}
+        for key in _DEFAULT_NPC_ATTRIBUTES:
+            val = result.get(key, 10)
+            attrs[key] = max(1, min(20, int(val)))
+        return attrs
+    except Exception:
+        return dict(_DEFAULT_NPC_ATTRIBUTES)
+
+
 def _require_npc_field(data: dict, key: str, cn_name: str) -> None:
     """Check that *key* exists in *data* and is truthy; exit otherwise."""
     if key not in data or not data[key]:
@@ -389,6 +427,33 @@ class NPCStore:
             from ChromaDB on startup and kept in sync via ``save``).
         """
         return list(self._npcs.values())
+
+    def clear_all(self) -> int:
+        # Delete every NPC card, its persisted state file and its history.
+        names = list(self._npcs.keys()) + [
+            n for n in self._states.keys() if n not in self._npcs
+        ]
+
+        try:
+            all_ids = self._collection.get()["ids"]
+            if all_ids:
+                self._collection.delete(ids=all_ids)
+        except Exception:
+            pass
+
+        for name in names:
+            try:
+                path = self._state_path(name)
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
+        count = len(self._npcs)
+        self._npcs.clear()
+        self._states.clear()
+        self._histories.clear()
+        return count
 
     def create(
         self,

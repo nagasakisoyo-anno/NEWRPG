@@ -28,6 +28,7 @@ JUDGE_SYSTEM_PROMPT = """\
 - **涉及角色技能的行动**（观察、潜行、交涉、追踪）→ skill_check(技能名, 修正值)
 - **攻击 NPC** → combat_attack(目标名)
 - **纯投骰子看运气**（"扔个d6""看看骰运"）→ roll_dice(表达式)
+- **玩家明确休息/睡觉/包扎伤口**（"我睡一觉""休整一下""处理伤口"）→ take_rest(小时数)
 - **不需要检定**
 
 ## DC 参考
@@ -72,8 +73,9 @@ def create_judge_agent(tools: list | None = None) -> Agent:
             difficulty_check,
             skill_check,
             combat_attack,
+            take_rest,
         )
-        tools = [roll_dice, difficulty_check, skill_check, combat_attack]
+        tools = [roll_dice, difficulty_check, skill_check, combat_attack, take_rest]
 
     return Agent(
         name="Judge",

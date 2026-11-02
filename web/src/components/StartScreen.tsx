@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useGameStore } from '../store/gameStore';
-import { apiFetch, apiPost, apiGet } from '../api';
+import { apiPost } from '../api';
 
 const LOADING_STEPS = [
   '连接 LLM...',
@@ -40,12 +40,8 @@ export default function StartScreen() {
 
     try {
       const res = await apiPost('/api/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          worldview: worldView || undefined,
-          npc_setup: npcSetup || undefined,
-        }),
+        worldview: worldView || undefined,
+        npc_setup: npcSetup || undefined,
       })
 
       if (!res.ok) {

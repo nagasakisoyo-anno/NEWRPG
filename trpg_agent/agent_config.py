@@ -43,6 +43,8 @@ class GameContext:
     debug: bool = False        # emit per-tool debug entries
     debug_log: list[str] = field(default_factory=list)  # collected debug lines
     recent_events: list[str] = field(default_factory=list)  # last N event summaries (for search_memory)
+    player_action: str = ""     # what the player just did (passed to Judge/Narrator)
+    world_setting: str = ""     # world description from config.yaml (passed to Narrator)
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +89,7 @@ _GM_SYSTEM_PROMPT = """\
 - **你引入新地点、新物品、新势力、新传说时** → 必须先调用 search_knowledge 确认是否存在相关设定，不得凭空编造
 - 玩家攻击 → 调用 combat_attack
 - 判定类工具（roll_dice / skill_check / difficulty_check）→ 在玩家行动结果不确定时调用；纯扮演动作（微笑、点头、叹气）无需检定，直接叙事
+- 玩家明确休息/睡觉/包扎伤口 → 调用 take_rest；HP 是唯一只能通过休息恢复的资源，不要凭空回血
 - 可在叙事中引入新NPC：有身份和对话潜力的调用 create_npc 注册，路人角色在叙事中描述即可
 
 ## 硬性规则（违反则游戏崩坏）

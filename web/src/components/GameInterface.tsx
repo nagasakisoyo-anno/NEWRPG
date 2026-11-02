@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useGameStore, Message } from '../store/gameStore';
-import { apiFetch, apiPost, apiGet } from '../api';
+import { apiPost, apiGet } from '../api';
 import StatePanel from './StatePanel'
 import ModalNPC from './ModalNPC'
 import ModalKnowledge from './ModalKnowledge'
@@ -16,6 +16,7 @@ export default function GameInterface() {
   const [gameOverCause, setGameOverCause] = useState('')
   const [showConsole, setShowConsole] = useState(false)
   const [consoleLogs, setConsoleLogs] = useState<string[]>([])
+  const [debugEnabled, setDebugEnabled] = useState(false)
   const consoleEndRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -35,7 +36,7 @@ export default function GameInterface() {
         if (data.logs?.length > 0) {
           setConsoleLogs((prev) => [...prev, ...data.logs].slice(-500))
         }
-        if (data.debug) setConsoleLogs((prev) => [...prev, '[系统] 调试模式已开启'].slice(-500))
+        setDebugEnabled(Boolean(data.debug))
       } catch {
         // silent
       }
@@ -69,11 +70,7 @@ export default function GameInterface() {
     startStreaming()
 
     try {
-      const res = await apiPost('/api/action', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action }),
-      })
+      const res = await apiPost('/api/action', { action })
 
       if (!res.ok) {
         const errText = await res.text()
@@ -321,7 +318,12 @@ export default function GameInterface() {
       {showConsole && (
         <div className="border-t border-coal-700 bg-coal-950">
           <div className="flex items-center justify-between px-4 py-1.5 bg-coal-900 border-b border-coal-800">
-            <span className="text-xs text-coal-400 font-mono">控制台</span>
+            <span className="text-xs text-coal-400 font-mono">
+              控制台
+              {!debugEnabled && (
+                <span className="ml-2 text-coal-500">（调试模式未开启，仅显示摘要）</span>
+              )}
+            </span>
             <button
               onClick={() => setConsoleLogs([])}
               className="text-xs text-coal-500 hover:text-coal-300"

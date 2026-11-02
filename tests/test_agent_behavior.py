@@ -6,11 +6,7 @@ a live LLM connection. Mock LLMs are used where needed.
 """
 
 import json
-import re
-import time
-from unittest.mock import MagicMock, patch
 
-import pytest
 
 from trpg_agent.agent_config import (
     GameContext,
@@ -127,56 +123,14 @@ class TestResponseParsing:
 
     @staticmethod
     def _parse_gm_response(text: str) -> dict:
-        """Replicate the JSON extraction logic from process() (lines ~659-695).
+        """Run the REAL extractor used by all three pipelines.
 
-        This is the actual logic used in game_master.py to parse GM responses.
+        This used to be a hand-copied duplicate of game_master's parsing, so the
+        tests kept passing while production silently drifted.
         """
-        # 1. Direct parse
-        try:
-            result = json.loads(text)
-            if isinstance(result, dict) and "narration" in result:
-                return result
-        except (json.JSONDecodeError, TypeError):
-            pass
+        from trpg_agent.game_master import GameMaster
 
-        # 2. Strip markdown code fences
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            if lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            cleaned = "\n".join(lines).strip()
-
-        try:
-            result = json.loads(cleaned)
-            if isinstance(result, dict) and "narration" in result:
-                return result
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-        # 3. Find JSON object with "narration" key
-        match = re.search(r'\{[^}]*"narration"[^}]*\}', text, re.DOTALL)
-        if match:
-            try:
-                result = json.loads(match.group())
-                if isinstance(result, dict) and "narration" in result:
-                    return result
-            except json.JSONDecodeError:
-                pass
-
-        # 4. Fallback: extract numbered suggestions from text
-        narration = text
-        suggestions = []
-        suggestion_match = re.findall(r'^\d+\.\s+(.+)$', text, re.MULTILINE)
-        if suggestion_match:
-            suggestions = suggestion_match[:3]
-            # Try to get narration before the first numbered item
-            first_num = re.search(r'\n\d+\.\s+', text)
-            if first_num:
-                narration = text[:first_num.start()].strip()
-
+        narration, suggestions = GameMaster._parse_gm_output(text)
         return {"narration": narration, "suggestions": suggestions}
 
     def test_parse_valid_json(self):

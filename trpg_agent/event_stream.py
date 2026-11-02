@@ -45,6 +45,7 @@ TOOL_DISPLAY_NAMES: dict[str, str] = {
     "difficulty_check":     "难度检定",
     "skill_check":          "技能检定",
     "combat_attack":        "战斗攻击",
+    "take_rest":            "休息恢复",
     "get_player_state":     "查询状态",
     "get_npc_state":        "查询NPC",
     "create_npc":           "创建NPC",

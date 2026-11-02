@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useGameStore, KnowledgeEntry } from '../store/gameStore';
-import { apiFetch, apiPost, apiGet } from '../api';
+import { apiPost, apiGet } from '../api';
 
 interface ModalKnowledgeProps {
   onClose: () => void
@@ -35,17 +35,13 @@ export default function ModalKnowledge({ onClose }: ModalKnowledgeProps) {
     setAddResult('')
 
     try {
-      const res = await apiPost('/api/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: `!world ${newKnowledge}` }),
-      })
+      const res = await apiPost('/api/command', { command: `!world ${newKnowledge}` })
       const data = await res.json()
       setAddResult(data.result || data.error || '添加完成')
       setNewKnowledge('')
 
       // Refresh
-      const refetch = await fetch('/api/knowledge')
+      const refetch = await apiGet('/api/knowledge')
       const kData = await refetch.json()
       if (kData.knowledge) {
         setKnowledge(kData.knowledge.map((k: any, i: number) => ({

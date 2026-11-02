@@ -113,6 +113,10 @@ class LLM:
             result = json.loads(text)
             if isinstance(result, dict):
                 return result
+            if isinstance(result, list):
+                # Some prompts ask for a bare array; wrap it so callers keeping
+                # a dict contract still work.
+                return {"items": result}
         except json.JSONDecodeError:
             pass
 

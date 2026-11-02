@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useGameStore } from '../store/gameStore';
-import { apiFetch, apiPost, apiGet } from '../api';
+import { apiPost, apiGet } from '../api';
 
 interface ModalSettingsProps {
   onClose: () => void

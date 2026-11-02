@@ -27,6 +27,7 @@ ORCHESTRATOR_SYSTEM_PROMPT = """\
 
 ### 需要 Judge（裁判）的情况
 - 玩家做了不确定结果的行动（攻击、攀爬、撬锁、躲闪等）
+- 玩家明确休息/睡觉/包扎伤口（take_rest 由 Judge 负责）
 - 使用 invoke_judge(action_description) 调用
 - 注意：如果玩家同时在和NPC说话，invoke_judge 可以和 invoke_npc 并行调用
 
@@ -60,6 +61,14 @@ ORCHESTRATOR_SYSTEM_PROMPT = """\
 ## 当前世界状态
 时间: {time_of_day} | 天气: {weather}
 场景NPC: {scene_npcs}
+
+## 世界设定
+{world_setting}
+
+## 玩家角色卡
+你的唯一玩家是 {player_name}。
+
+{player_card}
 """
 
 
@@ -135,10 +144,16 @@ def build_orchestrator_instructions(
     time_of_day: str = "",
     weather: str = "",
     scene_npcs: str = "",
+    world_setting: str = "",
+    player_name: str = "玩家",
+    player_card: str = "",
 ) -> str:
-    """Render the Orchestrator system prompt with current state placeholders."""
+    """Render the Orchestrator system prompt with current state and world info."""
     return ORCHESTRATOR_SYSTEM_PROMPT.format(
         time_of_day=time_of_day or "未知",
         weather=weather or "未知",
         scene_npcs=scene_npcs or "无",
+        world_setting=world_setting or "（未提供）",
+        player_name=player_name,
+        player_card=player_card or "（未提供）",
     )
