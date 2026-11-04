@@ -49,4 +49,8 @@ Thumbs.db
 .box-agent/
 .box-agent-scratch/
 
+# 本地平台配置与产品文档（不入库）
+.coze
+.trae/
+
 docs/
