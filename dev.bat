@@ -5,13 +5,23 @@ echo   TRPG Agent 开发模式 (热更新)
 echo ========================================
 echo.
 
-REM 检查 Python
-python --version >nul 2>&1
+REM ---- 解析 Python：TRPG_PYTHON > .venv > conda 环境 trpg > PATH 里的 python ----
+set "PY="
+if defined TRPG_PYTHON if exist "%TRPG_PYTHON%" set "PY=%TRPG_PYTHON%"
+if not defined PY if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
+REM 通过 conda 自身定位环境，避免写死某台机器的安装路径
+if not defined PY for /f "delims=" %%P in ('conda run -n trpg python -c "import sys;print(sys.executable)" 2^>nul') do if exist "%%P" set "PY=%%P"
+if not defined PY set "PY=python"
+%PY% --version >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [错误] 未找到 Python
+    echo [错误] 未找到可用的 Python
+    echo        本项目使用独立 conda 环境，先执行一次：
+    echo            conda create -n trpg python=3.11 -y
+    echo            .\dev.ps1
     pause
     exit /b 1
 )
+echo [OK] 使用解释器: %PY%
 
 REM 检查 Node.js (尝试自动安装)
 node --version >nul 2>&1
@@ -51,8 +61,8 @@ if "%DEEPSEEK_API_KEY%"=="" (
     set DEEPSEEK_API_KEY=!API_KEY!
 )
 
-echo [1/3] 安装 Python 依赖...
-pip install fastapi uvicorn python-dotenv >nul 2>&1
+echo [1/3] 安装 Python 依赖 (首次较慢)...
+%PY% -m pip install -q -r requirements.txt
 
 echo [2/3] 安装前端依赖...
 cd web
@@ -72,10 +82,10 @@ REM 设置环境变量
 set HF_ENDPOINT=https://hf-mirror.com
 
 REM 在同一窗口启动两个进程: Vite 后台 + Python 前台
-start "Vite Dev Server" /b cmd /c "cd web && npx vite --host"
+start "Vite Dev Server" /b cmd /c "cd web && npx vite --host 127.0.0.1"
 REM 等 Vite 启动
 timeout /t 3 /nobreak >nul
-python -m trpg_agent.api_server
+%PY% -m uvicorn trpg_agent.api_server:app --reload --reload-dir trpg_agent --host 127.0.0.1 --port 8000
 
 REM Ctrl+C 后会到这里，关闭 Vite 进程
 taskkill /f /fi "WINDOWTITLE eq Vite Dev Server" >nul 2>&1

@@ -3,6 +3,7 @@ data/chroma/
 
 # 运行时存档 / 记忆图（属于玩家数据，不入库）
 data/save.json
+data/saves/
 data/memory_graph.json
 
 # 前端构建产物
@@ -45,9 +46,7 @@ Thumbs.db
 .harness/
 .acl-report/
 .probe_write/
-
-参考
-世界生成
-实际测试
+.box-agent/
+.box-agent-scratch/
 
 docs/

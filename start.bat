@@ -55,7 +55,13 @@ if "%DEEPSEEK_API_KEY%"=="" (
 )
 
 echo [1/5] 安装 Python 依赖...
-pip install fastapi uvicorn >nul 2>&1
+set "PY="
+if defined TRPG_PYTHON if exist "%TRPG_PYTHON%" set "PY=%TRPG_PYTHON%"
+if not defined PY if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
+REM 通过 conda 自身定位环境，避免写死某台机器的安装路径
+if not defined PY for /f "delims=" %%P in ('conda run -n trpg python -c "import sys;print(sys.executable)" 2^>nul') do if exist "%%P" set "PY=%%P"
+if not defined PY set "PY=python"
+%PY% -m pip install -q -r requirements.txt >nul 2>&1
 if %errorlevel% neq 0 (
     echo [警告] pip install 失败，尝试继续...
 )
@@ -82,6 +88,6 @@ echo ========================================
 echo.
 
 set HF_ENDPOINT=https://hf-mirror.com
-python -m trpg_agent.api_server
+%PY% -m trpg_agent.api_server
 
 pause

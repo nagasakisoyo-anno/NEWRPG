@@ -70,14 +70,63 @@ if (-not $env:DEEPSEEK_API_KEY) {
 
 Write-Host ""
 
-# 安装 Python 依赖
-Write-Host "[1/4] 安装 Python 依赖..." -ForegroundColor Cyan
-try {
-    pip install fastapi uvicorn -q 2>$null
-    Write-Host "[✓] Python 依赖就绪" -ForegroundColor Green
-} catch {
-    Write-Host "[!] Python 依赖安装失败，将继续启动..." -ForegroundColor Yellow
+# ---- 解析 Python：conda 环境 trpg > .venv > py 启动器 ----
+function Find-CondaEnvPython([string]$name) {
+    if (-not (Get-Command conda -ErrorAction SilentlyContinue)) { return $null }
+    try {
+        $raw = (& conda env list --json 2>$null | Out-String)
+        $i = $raw.IndexOf('{')
+        if ($i -lt 0) { return $null }
+        $data = $raw.Substring($i) | ConvertFrom-Json
+        foreach ($e in $data.envs) {
+            if ((Split-Path $e -Leaf) -eq $name) {
+                $p = Join-Path $e "python.exe"
+                if (Test-Path $p) { return $p }
+            }
+        }
+    } catch { }
+    return $null
 }
+
+$pyExe = $null
+$pyPrefix = @()
+if ($env:TRPG_PYTHON -and (Test-Path $env:TRPG_PYTHON)) {
+    $pyExe = $env:TRPG_PYTHON
+} elseif (Test-Path ".venv\Scripts\python.exe") {
+    $pyExe = (Resolve-Path ".venv\Scripts\python.exe").Path
+} else {
+    # Ask conda where the environment lives instead of hardcoding one machine's path.
+    $pyExe = Find-CondaEnvPython "trpg"
+}
+if (-not $pyExe) {
+    if (Get-Command py.exe -ErrorAction SilentlyContinue) {
+        $pyExe = "py"; $pyPrefix = @("-3")
+    } elseif (Get-Command python.exe -ErrorAction SilentlyContinue) {
+        $pyExe = "python"
+    }
+}
+
+function Invoke-Py {
+    param([Parameter(ValueFromRemainingArguments = $true)] $Rest)
+    & $pyExe @pyPrefix @Rest
+}
+
+if (-not $pyExe -or -not ((Invoke-Py --version 2>&1 | Out-String).Trim())) {
+    Write-Host "[X] 未找到可用的 Python，请安装 Python 3.11+ : https://www.python.org/downloads/" -ForegroundColor Red
+    Read-Host "按回车键退出"
+    exit 1
+}
+
+
+# 安装 Python 依赖
+Write-Host "[1/4] 安装 Python 依赖 (首次较慢)..." -ForegroundColor Cyan
+Invoke-Py -m pip install -q -r requirements.txt
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[X] Python 依赖安装失败，请检查网络后重试" -ForegroundColor Red
+    Read-Host "按回车键退出"
+    exit 1
+}
+Write-Host "[OK] Python 依赖就绪" -ForegroundColor Green
 
 # 安装前端依赖
 Write-Host "[2/4] 安装前端依赖..." -ForegroundColor Cyan
@@ -111,5 +160,5 @@ Write-Host "  按 Ctrl+C 可停止服务" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
 
-$env:HF_ENDPOINT = "https://hf-mirror.com"
-python -m trpg_agent.api_server
+if (-not $env:HF_ENDPOINT) { $env:HF_ENDPOINT = "https://hf-mirror.com" }
+Invoke-Py -m trpg_agent.api_server
