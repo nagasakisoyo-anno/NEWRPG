@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useGameStore, Message } from '../store/gameStore';
-import { apiPost, apiGet } from '../api';
+import { apiPost, apiGet, apiJson } from '../api';
 import StatePanel from './StatePanel'
 import ModalNPC from './ModalNPC'
 import ModalKnowledge from './ModalKnowledge'
@@ -9,8 +9,9 @@ import ModalSettings from './ModalSettings'
 type ModalType = 'npc' | 'knowledge' | 'settings' | null
 
 export default function GameInterface() {
-  const { messages, addMessage, suggestions, setSuggestions, playerState, setPlayerState, npcs, setNpcs, knowledge, setKnowledge, isLoading, setIsLoading, error, setError, streamingText, isStreaming, startStreaming, appendStreaming, stopStreaming, agentStatus, setAgentStatus, currentTool, setCurrentTool } = useGameStore()
+  const { messages, addMessage, clearMessages, suggestions, setSuggestions, playerState, setPlayerState, npcs, setNpcs, knowledge, setKnowledge, isLoading, setIsLoading, error, setError, streamingText, isStreaming, startStreaming, appendStreaming, stopStreaming, agentStatus, setAgentStatus, currentTool, setCurrentTool } = useGameStore()
   const [inputValue, setInputValue] = useState('')
+  const [isRerolling, setIsRerolling] = useState(false)
   const [activeModal, setActiveModal] = useState<ModalType>(null)
   const [gameOverPending, setGameOverPending] = useState(false)
   const [gameOverCause, setGameOverCause] = useState('')
@@ -31,8 +32,7 @@ export default function GameInterface() {
     if (!showConsole) return
     const interval = setInterval(async () => {
       try {
-        const res = await apiGet('/api/debug')
-        const data = await res.json()
+        const data = await apiJson(await apiGet('/api/debug'))
         if (data.logs?.length > 0) {
           setConsoleLogs((prev) => [...prev, ...data.logs].slice(-500))
         }
@@ -52,12 +52,12 @@ export default function GameInterface() {
   // Fetch player state on mount
   useEffect(() => {
     apiGet('/api/status')
-      .then((r) => r.json())
+      .then(apiJson)
       .then((data) => {
         if (data.state) setPlayerState(data.state)
         if (data.npcs) setNpcs(data.npcs)
       })
-      .catch(() => {})
+      .catch((err) => setError(err?.message || '无法获取游戏状态'))
   }, [])
 
   const sendAction = async (action: string) => {
@@ -81,6 +81,7 @@ export default function GameInterface() {
       const decoder = new TextDecoder()
       let fullText = ''
       let finalData: any = null
+      let streamError: string | null = null
 
       if (reader) {
         let buffer = ''
@@ -119,6 +120,22 @@ export default function GameInterface() {
                   if (parsed.npc_name && parsed.npc_text) {
                     addMessage('npc', parsed.npc_text, parsed.npc_name)
                   }
+                } else if (parsed.type === 'dice_roll') {
+                  // The Narrator never prints numbers, so this event is the
+                  // only place the player sees what was actually rolled.
+                  addMessage('dice', parsed.roll_label || '判定', undefined, {
+                    kind: parsed.roll_kind || 'dice',
+                    label: parsed.roll_label || '判定',
+                    detail: parsed.roll_detail || '',
+                    success:
+                      typeof parsed.roll_success === 'boolean'
+                        ? parsed.roll_success
+                        : null,
+                  })
+                } else if (parsed.type === 'error') {
+                  // Backend failed mid-stream; SSE cannot change its status
+                  // code, so the failure arrives as a typed event.
+                  streamError = parsed.message || '服务端处理失败'
                 }
               } else if (parsed.text) {
                 fullText += parsed.text
@@ -134,6 +151,10 @@ export default function GameInterface() {
       }
 
       stopStreaming()
+
+      if (streamError) {
+        setError(streamError)
+      }
 
       // GM 消息 — narration 已由后端从 JSON 中提取，不含建议行
       if (fullText) {
@@ -175,25 +196,40 @@ export default function GameInterface() {
     sendAction(inputValue)
   }
 
+  const handleRerollOpening = async () => {
+    setIsRerolling(true)
+    setError(null)
+    try {
+      const data = await apiJson(await apiPost('/api/reroll_opening'))
+      clearMessages()
+      if (data.opening) addMessage('gm', data.opening)
+      setSuggestions(data.suggestions || [])
+      if (data.state) setPlayerState(data.state)
+      if (data.npcs) setNpcs(data.npcs)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '重新生成失败')
+    } finally {
+      setIsRerolling(false)
+    }
+  }
+
   const handleConfirmGameOver = async () => {
     setGameOverPending(false)
     try {
-      const res = await apiPost('/api/confirm_game_over')
-      const data = await res.json()
+      const data = await apiJson(await apiPost('/api/confirm_game_over'))
       if (data.result) addMessage('gm', data.result)
-    } catch {
-      setError('确认失败')
+    } catch (err) {
+      setError(`确认失败: ${err instanceof Error ? err.message : '未知错误'}`)
     }
   }
 
   const handleCancelGameOver = async () => {
     setGameOverPending(false)
     try {
-      const res = await apiPost('/api/cancel_game_over')
-      const data = await res.json()
+      const data = await apiJson(await apiPost('/api/cancel_game_over'))
       if (data.result) addMessage('gm', data.result)
-    } catch {
-      setError('取消失败')
+    } catch (err) {
+      setError(`取消失败: ${err instanceof Error ? err.message : '未知错误'}`)
     }
   }
 
@@ -261,6 +297,19 @@ export default function GameInterface() {
             )}
             <div ref={messagesEndRef} />
           </div>
+
+          {/* Reroll the opening while it is still the only message */}
+          {messages.length <= 1 && !isLoading && (
+            <div className="px-6 pb-2 flex justify-center">
+              <button
+                onClick={handleRerollOpening}
+                disabled={isRerolling}
+                className="px-3 py-1 text-xs rounded border border-coal-600 text-coal-400 hover:border-brass-600 hover:text-brass-400 transition-colors disabled:opacity-50"
+              >
+                {isRerolling ? '重新生成中…' : '↻ 换一个开场'}
+              </button>
+            </div>
+          )}
 
           {/* Suggestions */}
           {suggestions.length > 0 && (
@@ -416,6 +465,30 @@ function MessageBubble({ message }: { message: Message }) {
           <div className="bg-emerald-950/40 border border-emerald-700/30 rounded-lg rounded-tl-none px-4 py-2.5">
             <p className="whitespace-pre-wrap text-emerald-100 leading-relaxed">{message.content}</p>
           </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (message.role === 'dice') {
+    const roll = message.roll
+    const ok = roll?.success
+    const accent =
+      ok === true
+        ? 'border-emerald-700/50 text-emerald-300'
+        : ok === false
+          ? 'border-rose-800/50 text-rose-300'
+          : 'border-coal-600 text-coal-300'
+    const verdict = ok === true ? '成功' : ok === false ? '失败' : ''
+    return (
+      <div className="animate-fade-in flex justify-center">
+        <div
+          className={`inline-flex items-center gap-2 rounded-full border bg-coal-900/70 px-3 py-1 text-xs font-mono ${accent}`}
+        >
+          <span aria-hidden>🎲</span>
+          <span className="font-sans font-medium">{roll?.label || message.content}</span>
+          {roll?.detail && <span className="text-coal-400">{roll.detail}</span>}
+          {verdict && <span className="font-sans font-semibold">{verdict}</span>}
         </div>
       </div>
     )

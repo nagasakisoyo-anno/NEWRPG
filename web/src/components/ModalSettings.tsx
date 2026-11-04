@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useGameStore } from '../store/gameStore';
-import { apiPost, apiGet } from '../api';
+import { apiPost, apiGet, apiJson } from '../api';
 
 interface ModalSettingsProps {
   onClose: () => void
@@ -32,8 +32,7 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
     if (debugMode) {
       pollingTimer.current = setInterval(async () => {
         try {
-          const res = await apiGet('/api/debug')
-          const data = await res.json()
+          const data = await apiJson(await apiGet('/api/debug'))
           if (data.logs?.length > 0) {
             appendDebugLogs(data.logs)
           }
@@ -54,8 +53,7 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
 
   const handleToggleDebug = async () => {
     try {
-      const res = await apiPost('/api/debug/toggle')
-      const data = await res.json()
+      const data = await apiJson(await apiPost('/api/debug/toggle'))
       setDebugMode(data.debug)
       if (data.debug) {
         clearDebugLogs()
@@ -67,34 +65,35 @@ export default function ModalSettings({ onClose }: ModalSettingsProps) {
 
   const handleSave = async () => {
     try {
-      const res = await apiPost('/api/save')
-      const data = await res.json()
+      // Named slots: prompt so the player can label the save instead of
+      // silently overwriting one fixed file.
+      const label = window.prompt('存档名称', '')
+      if (label === null) return
+      const res = await apiPost('/api/save', { label })
+      const data = await apiJson(res)
       if (data.error) {
         alert(`保存失败: ${data.error}`)
       } else {
-        alert('存档已保存')
+        alert(`存档已保存（槽位 ${data.slot}）`)
       }
-    } catch {
-      alert('保存失败')
+    } catch (err) {
+      alert(`保存失败: ${err instanceof Error ? err.message : '未知错误'}`)
     }
   }
 
   const handleLoad = async () => {
     try {
       setIsLoading(true)
-      const res = await apiPost('/api/load')
-      const data = await res.json()
-      if (data.error) {
-        alert(data.error)
-      } else {
-        if (data.state) setPlayerState(data.state)
-        if (data.npcs) setNpcs(data.npcs)
-        setSuggestions([])
-        alert('存档已加载')
-        onClose()
-      }
-    } catch {
-      alert('加载失败')
+      // No slot = most recent one.  "no save" is a 404, so apiJson throws and
+      // the catch below reports the real reason.
+      const data = await apiJson(await apiPost('/api/load', {}))
+      if (data.state) setPlayerState(data.state)
+      if (data.npcs) setNpcs(data.npcs)
+      setSuggestions([])
+      alert('存档已加载')
+      onClose()
+    } catch (err) {
+      alert(`加载失败: ${err instanceof Error ? err.message : '未知错误'}`)
     } finally {
       setIsLoading(false)
     }

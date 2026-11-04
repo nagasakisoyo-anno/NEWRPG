@@ -27,3 +27,24 @@ export async function apiPost(url: string, body?: unknown): Promise<Response> {
 export async function apiGet(url: string): Promise<Response> {
   return apiFetch(url, { method: 'GET' })
 }
+
+/**
+ * Parse a JSON response, turning a non-2xx status into a thrown Error.
+ *
+ * The backend now returns real HTTP status codes with FastAPI's
+ * `{"detail": "..."}` body instead of a 200 carrying `{"error": ...}`,
+ * so callers must not treat a failed request as valid data.
+ */
+export async function apiJson<T = any>(res: Response): Promise<T> {
+  let body: any = null
+  try {
+    body = await res.json()
+  } catch {
+    body = null
+  }
+  if (!res.ok) {
+    const detail = body?.detail ?? body?.error ?? `请求失败 (${res.status})`
+    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+  }
+  return body as T
+}

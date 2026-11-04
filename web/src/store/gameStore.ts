@@ -11,10 +11,18 @@ export interface PlayerState {
 
 export interface Message {
   id: string
-  role: 'gm' | 'player' | 'npc'
+  role: 'gm' | 'player' | 'npc' | 'dice'
   content: string
   timestamp: number
   npcName?: string  // NPC name, only for role='npc'
+  roll?: DiceRoll   // only for role='dice'
+}
+
+export interface DiceRoll {
+  kind: string          // check / combat / dice / rest
+  label: string         // e.g. "观察检定"
+  detail: string        // e.g. "d100=66 vs 50"
+  success: boolean | null
 }
 
 export interface NPCInfo {
@@ -43,7 +51,12 @@ export interface ToolCallInfo {
 interface GameState {
   // Messages
   messages: Message[]
-  addMessage: (role: 'gm' | 'player' | 'npc', content: string, npcName?: string) => void
+  addMessage: (
+    role: 'gm' | 'player' | 'npc' | 'dice',
+    content: string,
+    npcName?: string,
+    roll?: DiceRoll,
+  ) => void
   clearMessages: () => void
 
   // Streaming
@@ -99,11 +112,18 @@ interface GameState {
 
 export const useGameStore = create<GameState>((set) => ({
   messages: [],
-  addMessage: (role, content, npcName?) =>
+  addMessage: (role, content, npcName?, roll?) =>
     set((state) => ({
       messages: [
         ...state.messages,
-        { id: `${Date.now()}-${Math.random()}`, role, content, timestamp: Date.now(), npcName },
+        {
+          id: `${Date.now()}-${Math.random()}`,
+          role,
+          content,
+          timestamp: Date.now(),
+          npcName,
+          roll,
+        },
       ],
     })),
   clearMessages: () => set({ messages: [] }),
