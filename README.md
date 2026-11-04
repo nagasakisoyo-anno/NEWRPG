@@ -4,38 +4,91 @@ AI 驱动的单人跑团应用。玩家扮演角色冒险，AI 担任 GM（叙�
 
 ## 快速开始
 
-```bash
-# 1. 配置 API Key（.env）
-DEEPSEEK_API_KEY=sk-xxx
+### 0. 准备
 
-# 2. 安装依赖
-pip install -r requirements.txt
-cd web && npm install && cd ..
+- Python 3.11+（**不要**用 Windows 应用商店版的 `python` 存根，它执行后什么都不输出）
+- Node.js 18+
+- 一个 DeepSeek API Key
 
-# 3. CLI 模式
-python -m trpg_agent.main --debug
+```powershell
+# 配置 Key：复制 .env.example 为 .env 再填
+Copy-Item .env.example .env
+notepad .env
+```
 
-# 4. Web 模式（前端 5000 / 后端 8000）
+### 1. 建独立环境（只需一次）
+
+本项目依赖 chromadb + sentence-transformers（含 torch，约 2GB），建议单独一个 conda 环境，别装进 base：
+
+```powershell
+conda create -n trpg python=3.11 -y
+conda activate trpg
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+```
+
+### 2. Web 开发预览（推荐）
+
+```powershell
 .\dev.ps1
 ```
 
-> 首次启动会从 HuggingFace 下载 `BAAI/bge-small-zh-v1.5` 向量模型（约 100MB）。
-> 国内网络可先设置 `HF_ENDPOINT=https://hf-mirror.com`（启动脚本已自动设置）。
+脚本会自动找到 conda 环境 `trpg`（也可用 `-Python <解释器路径>` 或 `TRPG_PYTHON` 覆盖），
+然后 `pip install -r requirements.txt` → `npm install` → 起 Vite（5000，HMR）
+→ 起 uvicorn（8000，`--reload`）。打开：
+
+- 前端：<http://127.0.0.1:5000>
+- 接口文档：<http://127.0.0.1:8000/docs>
+
+> 首次安装约 2GB（chromadb + torch，装完就不再下载）。
+> 首次请求会下载 `BAAI/bge-small-zh-v1.5` 向量模型（约 100MB，脚本已默认走 hf-mirror）。
+> 同一个 5000 端口就够用：`vite.config.ts` 把 `/api` 代理到 8000。
+
+### 3. 手动起两个终端（等价做法）
+
+```powershell
+conda activate trpg
+
+# 终端 A：后端
+python -m uvicorn trpg_agent.api_server:app --reload --reload-dir trpg_agent --port 8000
+
+# 终端 B：前端
+cd web
+npm run dev
+```
+
+### 4. CLI 模式
+
+```powershell
+conda activate trpg
+python -m trpg_agent.main --debug
+```
+
+### 5. 其它脚本
+
+| 脚本 | 用途 |
+|------|------|
+| `dev.ps1` / `dev.bat` | 开发预览：前端 HMR + 后端热重载 |
+| `start.ps1` / `start.bat` | 单端口预览：先 `npm run build`，再由 8000 直接托管 `web/dist` |
+
+> 没有 `DEEPSEEK_API_KEY` 也能启动、能点开界面，但 GM 只会返回兜底文本，
+> 属于「验证 UI/接口通了」，不是能玩的预览。
 
 ## 架构
 
 基于 **OpenAI Agents SDK** 的多 Agent 编排，DeepSeek 通过 Chat Completions 接入。
 
-**当前有两条管线，注意区别：**
+**一套管线，两个表现层。** CLI 与 Web 驱动的是同一个 Agent 图，差别只在呈现方式：
 
-| 入口 | 方法 | 使用的 Agent |
-|------|------|--------------|
-| CLI `main.py` | `GameMaster.process()` | Orchestrator → Judge / NPC / Narrator |
-| Web `POST /api/action` | `GameMaster.process_streaming()` | 单 GM Agent（旧管线，便于 SSE 逐句推送） |
+| 入口 | 方法 | 用途 |
+|------|------|------|
+| CLI `main.py` | `GameMaster.process()` | 同步执行，用于测试与调试 |
+| Web `POST /api/action` | `GameMaster.process_streaming()` | 异步 + SSE 状态事件，用于真实游玩 |
 
-设置 `TRPG_LEGACY_MODE=1` 可让 CLI 也走旧管线。
+两者共用 `_pre_dispatch`（结局确认 + `!` 命令）、`_build_orchestrator_payload`、
+`_resolve_narration`、`_record_turn`，因此行为不会再各自漂移。
+旧的单 GM Agent 管线、`TRPG_LEGACY_MODE` 和 Tool Advisor 已删除。
 
-### 新管线（CLI）
+### 管线
 
 ```
 Player Input
@@ -53,11 +106,11 @@ Orchestrator          只做路由，不写叙事
 {"narration": "...", "suggestions": ["...", "...", "..."]}
 ```
 
-### 工具（19 个 @function_tool）
+### 工具（@function_tool）
 
 | 类别 | 工具 |
 |------|------|
-| 判定 | roll_dice, difficulty_check, skill_check, combat_attack, take_rest |
+| 判定（Judge 专属） | roll_dice, difficulty_check, skill_check, combat_attack, take_rest |
 | 查询 | get_player_state, get_npc_state |
 | 场景 | create_npc, remove_npc, set_scene |
 | 角色 | invoke_npc, invoke_npcs, broadcast_event |
@@ -125,17 +178,33 @@ data/chroma/           ChromaDB 持久化（不入库）
 
 ## 功能
 
+### 开局设置（网页端）
+
 | 功能 | 说明 |
 |------|------|
-| 断点续存 | 退出/Ctrl+C 自动保存 `data/save.json`，重启续接 |
-| 新游戏 | 清空记忆 + NPC + 存档，从背景故事重新播种 NPC |
+| 玩家角色卡 | 界面内填姓名、背景、心之锚、六维属性（滑条 + 点数预算）、技能列表；体质 × 3 = HP 上限 |
+| 世界设定卡 | 世界名、描述，外加纪元 / 气候 / 基调 / 技术 / 超自然 / 危险度 / 开场时间 / 开场天气 / 补充设定；含 3 个一键模板 |
+| 初始 NPC | 可增删的卡片列表（最多 6 个），每个含姓名、背景、语调、与玩家关系、口头禅和六维属性滑条 |
+| 设定预设 | 整套设定可存为本地预设、导出 / 导入 JSON 文件 |
+
+> 结构化 NPC 按填写的数值**直接建卡**，不经 LLM 猜测；只有留空的属性才由 LLM 按身份推断。
+
+### 游戏内
+
+| 功能 | 说明 |
+|------|------|
 | 多 Agent NPC | 每个 NPC 独立 Agent，自主决定是否回应 / 沉默 |
-| 角色死亡 | HP≤0 → game_over → 二次确认后清档 |
-| 剧本系统 | `data/knowledge/scenario_black_cat.md` 节点式剧本 |
 | NPC 记忆 | 独立向量库，按 NPC 过滤，LLM 提取摘要 |
+| NPC 详情面板 | 展开查看背景、人格、属性、关系、私有记忆与对话历史 |
+| 判定可见 | 检定 / 战斗 / 休息的骰子明细以独立气泡呈现（叙事内仍不含数值） |
+| 重掷开场 | 开场不满意可「换一个开场」，保留世界与 NPC 只重生成叙事 |
+| 多存档槽 | 命名存档、列表选择、删除；兼容旧的 `data/save.json` |
+| 知识库管理 | 自然语言添加，或整段粘贴设定文档按段落切块入库；条目可删除 |
+| 角色死亡 | HP≤0 → game_over → 二次确认后清档 |
 | 场景管理 | set_scene / remove_npc 维护场景 NPC 列表 |
-| 世界模拟 | 每 3 回合 NPC 自主行动，GM 叙事包装 |
+| 世界模拟 | 每 3 回合在场 NPC 各自自主行动 |
 | 休息恢复 | `take_rest` 是 HP 唯一的恢复途径 |
+| 剧本系统 | `data/knowledge/scenario_black_cat.md` 节点式剧本（自定义世界观时自动隔离） |
 | 知识目录 | `config.yaml` 的 `knowledge.files` 可指向任意目录（换世界观不用改代码） |
 
 ## 配置项
@@ -147,13 +216,38 @@ data/chroma/           ChromaDB 持久化（不入库）
 | `TRPG_DEBUG` | `1` 开启调试日志 |
 | `TRPG_API_TOKEN` | 设置后所有 API 需 Bearer Token（前端用 `VITE_API_TOKEN`） |
 | `TRPG_CORS_ORIGINS` | 允许的来源，逗号分隔，默认 `*` |
-| `TRPG_LEGACY_MODE` | `1` 让 CLI 走旧单 Agent 管线 |
+| `TRPG_MODEL` | 模型名，默认 `deepseek-chat`（`deepseek-v4-flash` 已被官方退役） |
+| `TRPG_BASE_URL` | API 地址，默认 `https://api.deepseek.com` |
 | `HF_ENDPOINT` | 向量模型下载镜像 |
 
 ## 已知限制
 
-- **Web 端仍使用旧单 Agent 管线**（`process_streaming`），新三 Agent 架构只在 CLI 生效；
-  迁移时会失去当前逐句 SSE 推送的细粒度状态事件。
 - **单用户**：`GameMaster` 是全局单例，回合用 `asyncio.Lock` 串行化，不支持并发玩家。
 - **默认无鉴权**：不设置 `TRPG_API_TOKEN` 时任何本机进程都能读写游戏状态。
-- **存档无版本号**：字段变更后旧存档可能加载失败。
+- **存档已带版本号**（`version: 2`，含世界与角色卡）；更早的存档仍可读，但缺失的字段会沿用当前值。
+- **Orchestrator 复述风险已兜底但未消除**：叙事以 `invoke_narrator` 在工具边界
+  截获的 JSON 为准（`GameContext.narrator_output`），Orchestrator 的改写会被忽略；
+  但若它干脆不调用 Narrator，仍会回退到解析其自身输出。
+
+## 测试
+
+需要已安装 `requirements.txt` 的 Python 环境（README 开头创建的那个 conda 环境）。
+
+```powershell
+conda activate trpg
+pytest tests/ -q                       # 272 项单元/回归测试
+python -B .harness/logic_check.py      # 51 项服务端逻辑回归（工具级）
+python -B .harness/pipeline_smoke.py   # 单管线端到端烟测（CLI 与 Web 行为一致）
+python -B .harness/live_api_check.py   # 真实 LLM 抽验新 API（需 DEEPSEEK_API_KEY）
+```
+
+`.harness/` 里的脚本自带 chromadb / openai-agents / pytest 的轻量替身，
+因此在**没有装依赖**的解释器上也能跑，用于快速校验服务端逻辑：
+
+```powershell
+python -B .harness/run_tests.py        # 用替身执行 tests/ 中的纯逻辑用例
+```
+
+> 替身只保证逻辑一致，不保证 API 形态一致（例如真实 `@function_tool` 返回
+> `FunctionTool` 对象而替身返回原函数）。涉及 SDK 对象结构的断言请用
+> `tool_names()` 这类兼容读取，并以真实 `pytest` 的结果为准。
