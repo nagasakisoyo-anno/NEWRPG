@@ -109,6 +109,74 @@ class Character:
         """
         return load_character(config_path)
 
+    @classmethod
+    def from_dict(cls, data: dict) -> Character:
+        """Build a character from an already-parsed mapping.
+
+        Used by the web start screen, which posts a structured player card
+        instead of editing config.yaml.  Unlike :func:`load_character` this
+        raises ``ValueError`` rather than calling ``sys.exit``, so an API
+        request can report the problem instead of killing the server.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("角色卡必须是对象")
+
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise ValueError("角色卡缺少 name")
+
+        raw_core = data.get("core") or []
+        if isinstance(raw_core, str):
+            core = [c.strip() for c in raw_core.replace("；", ";").split(";") if c.strip()]
+        else:
+            core = [str(c).strip() for c in raw_core if str(c).strip()]
+        if not core:
+            raise ValueError("角色卡缺少 core（角色背景）")
+
+        raw_attrs = data.get("attributes") or {}
+        if not isinstance(raw_attrs, dict) or not raw_attrs:
+            raise ValueError("角色卡缺少 attributes（属性）")
+        attributes: dict[str, int] = {}
+        for key, value in raw_attrs.items():
+            try:
+                attributes[str(key)] = max(1, min(20, int(value)))
+            except (TypeError, ValueError):
+                raise ValueError(f"属性「{key}」必须是 1-20 的整数")
+
+        skills: list[dict[str, Any]] = []
+        for entry in data.get("skills") or []:
+            if not isinstance(entry, dict):
+                continue
+            sname = str(entry.get("name") or "").strip()
+            if not sname:
+                continue
+            try:
+                svalue = max(1, min(99, int(entry.get("value", 50))))
+            except (TypeError, ValueError):
+                svalue = 50
+            skills.append({"name": sname, "value": svalue})
+
+        relations = data.get("relations") or {}
+        if not isinstance(relations, dict):
+            relations = {}
+
+        try:
+            sequence = int(data.get("sequence", 9))
+        except (TypeError, ValueError):
+            sequence = 9
+
+        return cls(
+            name=name,
+            core=core,
+            attributes=attributes,
+            skills=skills,
+            pathway=str(data.get("pathway") or "").strip(),
+            sequence=sequence,
+            anchor=str(data.get("anchor") or "").strip(),
+            relations={str(k): str(v) for k, v in relations.items()},
+            beyonder_abilities=list(data.get("beyonder_abilities") or []),
+        )
+
 
 # ---------------------------------------------------------------------------
 #  Module-level loader

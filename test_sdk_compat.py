@@ -8,6 +8,8 @@ from agents import (
     set_tracing_disabled,
 )
 
+from trpg_agent.agent_config import DEFAULT_MODEL
+
 
 @function_tool
 def get_weather(city: str) -> str:
@@ -33,7 +35,8 @@ def main():
         print("ERROR: DEEPSEEK_API_KEY not set")
         return
 
-    client = AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    from trpg_agent.agent_config import DEFAULT_BASE_URL
+    client = AsyncOpenAI(api_key=api_key, base_url=DEFAULT_BASE_URL)
     set_default_openai_client(client)
     set_default_openai_api("chat_completions")  # DeepSeek doesn't support Responses API
     set_tracing_disabled(True)  # Disable tracing for cleaner output
@@ -44,7 +47,7 @@ def main():
     simple_agent = Agent(
         name="TestAgent",
         instructions="You are a test assistant. Reply briefly in English.",
-        model="deepseek-v4-flash",
+        model=DEFAULT_MODEL,
     )
     result = Runner.run_sync(simple_agent, "Say hello in one sentence")
     print(f"Output: {result.final_output[:200].encode('ascii', 'replace').decode()}")
@@ -56,7 +59,7 @@ def main():
         name="WeatherAgent",
         instructions="You can use get_weather tool. Reply in English.",
         tools=[get_weather],
-        model="deepseek-v4-flash",
+        model=DEFAULT_MODEL,
     )
     result = Runner.run_sync(weather_agent, "What's the weather in Tokyo?")
     print(f"Output: {result.final_output[:200].encode('ascii', 'replace').decode()}")
@@ -68,7 +71,7 @@ def main():
         name="MultiToolAgent",
         instructions="You can use get_weather and roll_dice. Reply in English.",
         tools=[get_weather, roll_dice],
-        model="deepseek-v4-flash",
+        model=DEFAULT_MODEL,
     )
     result = Runner.run_sync(
         multi_agent,

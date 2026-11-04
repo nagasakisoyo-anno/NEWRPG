@@ -22,6 +22,7 @@ StatusEventType = Literal[
     "tool_call_start",
     "tool_call_end",
     "npc_message",
+    "dice_roll",
 ]
 
 
@@ -34,6 +35,10 @@ class StatusEvent:
     args_json: str | None = None        # raw arguments JSON
     npc_name: str | None = None         # NPC name for npc_message events
     npc_text: str | None = None         # NPC dialogue text for npc_message events
+    roll_kind: str | None = None        # dice_roll: check / combat / dice / rest
+    roll_label: str | None = None       # dice_roll: e.g. "观察检定"
+    roll_detail: str | None = None      # dice_roll: e.g. "d100=66 vs 50"
+    roll_success: bool | None = None    # dice_roll: outcome, None when N/A
 
 
 # ---------------------------------------------------------------------------
@@ -128,29 +133,24 @@ class AgentStatusHooks(RunHooks):
         tool_name = getattr(context, "tool_name", None) or getattr(tool, "qualified_name", "?")
         await self._queue.put(make_tool_event("tool_call_end", tool_name, result=result))
 
-        # Emit npc_message event when invoke_npc returns, so frontend can
-        # render NPC dialogue as a separate chat bubble (group-chat style).
-        if tool_name == "invoke_npc" and result:
-            npc_name, npc_text = _parse_npc_result(result)
-            if npc_name and npc_text:
-                await self._queue.put(StatusEvent(
-                    type="npc_message",
-                    npc_name=npc_name,
-                    npc_text=npc_text,
-                ))
+
+# NOTE: npc_message events are no longer reverse-engineered from tool output.
+# invoke_npc / invoke_npcs / broadcast_event each record their NPC lines on
+# GameContext.npc_messages, and GameMaster.process_streaming replays them, so
+# group chat now works for all three tools instead of only invoke_npc.
 
 
 def _parse_npc_result(result: str) -> tuple[str, str]:
-    """Parse invoke_npc tool result into (npc_name, npc_text).
+    """Parse an ``'NPC名: "台词"'`` tool result into (npc_name, npc_text).
 
-    The tool returns format:  'NPC名: "对话内容"'
+    Retained as a helper for log formatting and tests.
     """
     import re
-    match = re.match(r'^(.+?):\s*[""「](.+?)[""」]$', result.strip(), re.DOTALL)
+    match = re.match(r'^(.+?):\s*["“「](.+?)["”」]$', result.strip(), re.DOTALL)
     if match:
         return match.group(1).strip(), match.group(2).strip()
     # Fallback: split on first colon
     if ':' in result:
         name, text = result.split(':', 1)
-        return name.strip(), text.strip().strip('"').strip('"').strip('「」')
+        return name.strip(), text.strip().strip('"').strip('“”').strip('「」')
     return "", result

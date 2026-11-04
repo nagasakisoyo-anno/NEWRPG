@@ -54,13 +54,39 @@ def clear_tool_cache() -> None:
 # Dice / Check tools (stateless)
 # ---------------------------------------------------------------------------
 
+def _record_roll(
+    ctx: RunContextWrapper[GameContext],
+    kind: str,
+    label: str,
+    detail: str,
+    success: bool | None = None,
+) -> None:
+    """Record a visible dice result on the context.
+
+    The Narrator must never print numbers, so the UI needs this structured
+    channel to show the player what was actually rolled.
+    """
+    game_ctx = getattr(ctx, "context", None)
+    rolls = getattr(game_ctx, "dice_rolls", None)
+    if rolls is None:
+        return
+    rolls.append({
+        "kind": kind,
+        "label": label,
+        "detail": detail,
+        "success": success,
+    })
+
+
 @function_tool
 def roll_dice(ctx: RunContextWrapper[GameContext], expression: str) -> str:
     """Roll dice. expression like 'd20', '3d6+2', 'd100'."""
     try:
         results, total = dice_roll(expression)
         detail = " + ".join(str(r) for r in results)
-        return f"投掷 {expression}: [{detail}] → {total}"
+        out = f"投掷 {expression}: [{detail}] → {total}"
+        _record_roll(ctx, "dice", f"投掷 {expression}", f"[{detail}] → {total}")
+        return out
     except Exception as e:
         return f"骰子错误: {e}"
 
@@ -71,6 +97,8 @@ def difficulty_check(ctx: RunContextWrapper[GameContext], dc: int = 12, modifier
     result = check_dc(dc=dc, modifier=modifier)
     roll_val = result["roll"]
     total = result["total"]
+    detail = f"d20={roll_val}{modifier:+d} = {total} vs DC{dc}"
+    _record_roll(ctx, "check", "难度检定", detail, bool(result["success"]))
     if result["success"]:
         return f"d20={roll_val}+{modifier}={total} ≥ DC{dc} → 成功"
     else:
@@ -92,6 +120,10 @@ def skill_check(ctx: RunContextWrapper[GameContext], skill_name: str, modifier: 
     result = check_skill(skill_value, modifier=modifier)
     roll_val = result["roll"]
     effective = result["effective_skill"]
+    _record_roll(
+        ctx, "check", f"{skill_name}检定",
+        f"d100={roll_val} vs {effective}", bool(result["success"]),
+    )
     if result["success"]:
         return f"d100={roll_val} ≤ 技能{effective} → 成功"
     else:
@@ -312,6 +344,10 @@ def combat_attack(ctx: RunContextWrapper[GameContext], target: str) -> str:
         _, counter_dmg = dice_roll("1d6")
         game_ctx.player_state.take_damage(counter_dmg)
         ps = game_ctx.player_state.get_state()
+        _record_roll(
+            ctx, "combat", f"攻击 {target}",
+            f"d20={roll_val} vs DC12 → 落空｜反击 {counter_dmg} 伤害", False,
+        )
         return (
             f"d20={roll_val} < DC12 → 攻击落空｜"
             f"对方反击(d6={counter_dmg})，你受到{counter_dmg}点伤害 "
@@ -329,12 +365,20 @@ def combat_attack(ctx: RunContextWrapper[GameContext], target: str) -> str:
     npc_state = game_ctx.npc_store.get_state(target)
     if npc_state is None:
         npc_state = StateMachine(max_hp=calc_max_hp(target_npc.attributes))
-        game_ctx.npc_store._states[target] = npc_state
+        ensure = getattr(game_ctx.npc_store, "ensure_state", None)
+        if callable(ensure):
+            npc_state = ensure(target, npc_state)
+        else:  # pragma: no cover - legacy store without the helper
+            game_ctx.npc_store._states[target] = npc_state
 
     def_status = npc_state.take_damage(damage)
     def_hp = f"{npc_state.hp}/{npc_state.max_hp}"
 
     result = f"d20={roll_val} ≥ DC12 → 命中（d6={dmg_roll}+{str_bonus}={damage}点伤害, {target} HP {def_hp}）"
+    _record_roll(
+        ctx, "combat", f"攻击 {target}",
+        f"d20={roll_val} vs DC12 → 命中｜{damage} 伤害（{target} {def_hp}）", True,
+    )
     if def_status == "dead":
         result += f" —— {target}倒下！"
         if target in game_ctx.scene_npcs:
@@ -377,6 +421,10 @@ def take_rest(ctx: RunContextWrapper[GameContext], hours: int = 1) -> str:
     after = ps.get_state()
     if game_ctx.debug:
         game_ctx.debug_log.append(f"[工具] take_rest: {hours}h +{healed}HP")
+    _record_roll(
+        ctx, "rest", f"休息 {hours} 小时",
+        f"恢复 {after['hp'] - before_hp} HP（{after['hp']}/{after['max_hp']}）", True,
+    )
     return (
         f"休息 {hours} 小时后恢复 {after['hp'] - before_hp} 点 HP "
         f"(HP {after['hp']}/{after['max_hp']})｜体力 {before_stamina} → {after['stamina']}"
@@ -400,6 +448,21 @@ def search_knowledge(ctx: RunContextWrapper[GameContext], query: str) -> str:
     return _cached("knowledge", query, _produce)
 
 
+def _query_tokens(query: str) -> list[str]:
+    """Split a query into match tokens that work for Chinese and English alike.
+
+    ``"码头的商人".split()`` yields the whole string, so the original
+    whitespace-only tokenisation never matched Chinese text.  For CJK we fall
+    back to character bigrams, which is enough for a recent-events keyword scan.
+    """
+    words = [w for w in query.lower().split() if len(w) >= 2]
+    tokens: list[str] = list(words)
+    for word in words or [query.strip()]:
+        if any('\u4e00' <= ch <= '\u9fff' for ch in word):
+            tokens.extend(word[i:i + 2] for i in range(len(word) - 1))
+    return [t for t in tokens if len(t) >= 2]
+
+
 @function_tool
 def search_memory(ctx: RunContextWrapper[GameContext], query: str) -> str:
     """Search adventure memory (past events, NPC interactions, etc.).
@@ -417,11 +480,11 @@ def search_memory(ctx: RunContextWrapper[GameContext], query: str) -> str:
 
         # 1. Fast path: recent_events in-memory match
         if game_ctx.recent_events:
-            query_lower = query.lower()
+            tokens = _query_tokens(query)
             for event in game_ctx.recent_events:
                 if len(lines) >= 3:
                     break
-                if any(word in event for word in query_lower.split() if len(word) >= 2):
+                if any(tok in event.lower() for tok in tokens):
                     if event[:20] not in seen:
                         lines.append(f"- {event}")
                         seen.add(event[:20])
@@ -546,6 +609,10 @@ async def _respond_as_npc(game_ctx: GameContext, name: str, prompt: str) -> str:
 
     # Persist NPC state
     game_ctx.npc_store.save_state(name)
+
+    # Collect for the UI: the single pipeline surfaces NPC lines as their own
+    # chat bubbles, so this no longer depends on parsing hook output.
+    game_ctx.npc_messages.append({"name": name, "text": npc_reply})
 
     return f'{name}: "{npc_reply}"'
 
@@ -697,8 +764,13 @@ async def invoke_narrator(
     )
 
     try:
-        result = await Runner.run(narrator, input=input_text, max_turns=1)
+        # context= keeps the Narrator consistent with every other sub-agent call,
+        # so adding a tool to the Narrator later cannot silently get a None ctx.
+        result = await Runner.run(narrator, input=input_text, context=game_ctx, max_turns=1)
         output = result.final_output
+        # Intercept the authoritative narration here: the Orchestrator is only
+        # asked to relay this JSON and an LLM may paraphrase or truncate it.
+        game_ctx.narrator_output = output
         if game_ctx.debug:
             game_ctx.debug_log.append(f"[Narrator] 叙事生成: {len(output)}字符")
         return output
@@ -706,11 +778,13 @@ async def invoke_narrator(
         if game_ctx.debug:
             game_ctx.debug_log.append(f"[Narrator] 调用失败: {e}")
         # Fallback: return a simple narration
-        return (
+        fallback = (
             '{"narration": "'
             + all_results[:200].replace('"', "'").replace('\n', ' ')
             + '", "suggestions": ["继续探索", "查看周围", "休息一会"]}'
         )
+        game_ctx.narrator_output = fallback
+        return fallback
 
 
 @function_tool
@@ -780,6 +854,7 @@ async def broadcast_event(
                 game_ctx.npc_store.append_history(name, "user", f"[事件] {event}")
                 game_ctx.npc_store.append_history(name, "assistant", response)
                 game_ctx.npc_store.save_state(name)
+                game_ctx.npc_messages.append({"name": name, "text": response})
                 return f'{name}: "{response}"'
             return None
         except Exception as e:

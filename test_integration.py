@@ -24,8 +24,8 @@ def main():
         print("[SKIP] LLM not available — check DEEPSEEK_API_KEY")
         return
 
-    if gm.gm_agent is None:
-        print("[SKIP] gm_agent not created")
+    if gm._orchestrator_agent is None:
+        print("[SKIP] orchestrator agent not created")
         return
 
     print(f"[OK] GameMaster created, player: {gm.player.name}")

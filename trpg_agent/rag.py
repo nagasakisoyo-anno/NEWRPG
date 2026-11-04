@@ -415,6 +415,61 @@ class KnowledgeBase:
             })
         return entries
 
+    def delete(self, entry_id: str) -> bool:
+        """Delete one knowledge entry by id.  Returns False if absent."""
+        if not entry_id:
+            return False
+        try:
+            existing = self._collection.get(ids=[entry_id])
+        except Exception:
+            return False
+        if not (existing.get("ids") or []):
+            return False
+        try:
+            self._collection.delete(ids=[entry_id])
+        except Exception:
+            return False
+        return True
+
+    def add_text(
+        self,
+        text: str,
+        known_by: Union[str, List[str]] = "所有人",
+        category: str = "",
+        chunk_tokens: int = 500,
+        overlap_tokens: int = 100,
+    ) -> int:
+        """Index a pasted block of text, chunked like a knowledge file.
+
+        Lets the UI import a long setting document without writing a .md file
+        first.  Returns the number of chunks stored.
+        """
+        body = (text or "").strip()
+        if not body:
+            return 0
+
+        meta, stripped = _parse_front_matter(body)
+        if meta.get("known_by"):
+            known_by = meta["known_by"]
+        if meta.get("category"):
+            category = meta["category"]
+
+        existing = {e["content"] for e in self.list_all(limit=1000)}
+        added = 0
+        for chunk in _chunk_with_overlap(
+            _split_heading_paragraphs(stripped or body),
+            chunk_tokens=chunk_tokens,
+            overlap_tokens=overlap_tokens,
+        ):
+            content = chunk.get("content", "") if isinstance(chunk, dict) else str(chunk)
+            content = content.strip()
+            if not content or content in existing:
+                continue
+            self.add_knowledge(content=content, known_by=known_by, category=category)
+            existing.add(content)
+            added += 1
+        return added
+
     def load_from_dir(self, dir_path: str, chunk_tokens: int = 500,
                       overlap_tokens: int = 100) -> None:
         """Load all ``.md`` files from a directory.

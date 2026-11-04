@@ -19,9 +19,10 @@ if __name__ == "__main__":
     if _project_root not in sys.path:
         sys.path.insert(0, _project_root)
 
-from dotenv import load_dotenv
+from trpg_agent.config import load_credentials, describe as describe_credentials
 
-load_dotenv()
+# Env vars win over .env; see trpg_agent/config.py for the precedence rules.
+load_credentials()
 
 from rich.console import Console
 from rich.panel import Panel
@@ -44,14 +45,17 @@ def main() -> None:
     # Config path
     config_path = os.environ.get("TRPG_CONFIG", args.config)
 
-    # ---- Check API key early and warn ----
-    if not os.environ.get("DEEPSEEK_API_KEY"):
+    # ---- Report where the API key came from (or warn when missing) ----
+    from trpg_agent.config import has_api_key
+
+    if has_api_key():
+        console.print(f"[dim]{describe_credentials()}[/dim]")
+    else:
         console.print()
         console.print(
             Panel(
-                "[yellow]DEEPSEEK_API_KEY 环境变量未设置。[/yellow]\n"
-                "LLM 对话功能将不可用，但骰子、角色信息和事件判定可以正常使用。\n"
-                "请设置环境变量后重启以获得完整功能。",
+                "[yellow]" + describe_credentials() + "[/yellow]\n\n"
+                "LLM 对话功能将不可用，但骰子、角色信息和事件判定可以正常使用。",
                 title="[bold]提示[/bold]",
                 border_style="yellow",
             )
@@ -80,8 +84,12 @@ def main() -> None:
     world_name = gm.world.get("name", "未知世界")
 
     # ---- Load save or generate opening ----
-    save_path = "data/save.json"
-    if gm.load_save(save_path):
+    # CLI always uses the most recent slot so it stays a quick test surface.
+    from trpg_agent import saves as _saves
+
+    _latest = _saves.latest_slot()
+    save_path = _saves.slot_path(_latest) if _latest else _saves.LEGACY_SAVE
+    if _latest and gm.load_save(save_path):
         opening = gm.generate_continuation()
         opening_title = "[bold]续接[/bold]"
     else:
@@ -120,7 +128,7 @@ def main() -> None:
             user_input = Prompt.ask("> ")
         except (KeyboardInterrupt, EOFError):
             console.print()
-            gm.save("data/save.json")
+            gm.save(save_path)
             console.print("[dim]进度已保存。冒险结束。再见。[/dim]")
             break
 
@@ -130,12 +138,15 @@ def main() -> None:
 
         # ---- Exit commands ----
         if user_input.lower() in ("exit", "quit", "退出"):
-            gm.save("data/save.json")
+            gm.save(save_path)
             console.print("[dim]进度已保存。冒险结束。再见。[/dim]")
             break
 
         # ---- Slash commands ----
-        if user_input.startswith("/"):
+        # NOTE: /confirm must reach GameMaster.process(), which owns the
+        # game-over confirmation gate.  It used to fall through to the
+        # "未知命令" branch, making a death impossible to confirm.
+        if user_input.startswith("/") and not user_input.startswith("/confirm"):
             if user_input.startswith("/dice"):
                 expr = user_input[len("/dice") :].strip()
                 if not expr:
@@ -172,15 +183,48 @@ def main() -> None:
             console.print("[dim]角色已死亡。冒险结束。[/dim]")
             break
 
-        # ---- Display response (suggestions / world events) ----
+        # ---- Display response ----
         if reply and reply.strip():
+            # Dice results first: the Narrator never prints numbers, so this
+            # is where the player actually sees what was rolled.
+            for roll_info in getattr(gm, "_last_dice_rolls", []):
+                ok = roll_info.get("success")
+                mark = "" if ok is None else ("[green]成功[/green]" if ok else "[red]失败[/red]")
+                console.print(
+                    f"  [dim]🎲[/dim] [bold]{roll_info.get('label','')}[/bold]  "
+                    f"[dim]{roll_info.get('detail','')}[/dim]  {mark}"
+                )
+
+            # NPC lines came from their own Agents this turn — show them as
+            # distinct speakers so the CLI mirrors the web group-chat view.
+            for msg in getattr(gm, "_last_npc_messages", []):
+                console.print(
+                    Panel(
+                        msg.get("text", ""),
+                        title=f"[bold magenta]{msg.get('name', 'NPC')}[/bold magenta]",
+                        border_style="magenta",
+                    )
+                )
+
             console.print(
                 Panel(
                     reply.strip(),
-                    title="[bold]建议[/bold]" if not reply.startswith("【世界模拟】") else "[bold]世界事件[/bold]",
+                    title="[bold]叙事[/bold]",
                     border_style="green",
                 )
             )
+
+            if gm._last_suggestions:
+                lines = "\n".join(
+                    f"  [cyan]{i}.[/cyan] {s}"
+                    for i, s in enumerate(gm._last_suggestions, 1)
+                )
+                console.print(Panel(lines, title="[bold]建议[/bold]", border_style="blue"))
+
+            if gm._game_over_pending:
+                console.print(
+                    f"[yellow]输入 /confirm 确认结束，或任意其他输入继续冒险。[/yellow]"
+                )
         else:
             # 流式叙述已完成，打印空行分隔
             console.print()

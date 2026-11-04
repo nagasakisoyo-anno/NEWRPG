@@ -515,6 +515,18 @@ class NPCStore:
         """Get the StateMachine for an NPC."""
         return self._states.get(name)
 
+    def ensure_state(self, name: str, default: StateMachine) -> StateMachine:
+        """Return the NPC's StateMachine, registering *default* if absent.
+
+        Gives tools a supported way to attach a state machine instead of
+        reaching into the private ``_states`` mapping.
+        """
+        existing = self._states.get(name)
+        if existing is not None:
+            return existing
+        self._states[name] = default
+        return default
+
     # ------------------------------------------------------------------
     #  Per-NPC conversation history
     # ------------------------------------------------------------------
